@@ -1,8 +1,22 @@
 {
   "mcpServers": {
     "codex-web-search": {
-      "command": "npx",
-      "args": ["-y", "github:dhicoc/codex-web-search-mcp"]
+      "command": "node",
+      "args": ["C:/Users/你的用户名/.workbuddy/binaries/node/versions/22.22.2/node_modules/codex-web-search-mcp/codex-web-search-mcp.js"]
     }
   }
 }
+
+// 说明：
+// ★ 首选（最可靠，全平台通用）：先 `npm install -g github:dhicoc/codex-web-search-mcp`，
+//   再把上面 args 里的路径换成你机器上 `npm root -g` 返回目录下的
+//   codex-web-search-mcp/codex-web-search-mcp.js。
+//   `node` 是 .exe，Claude Code 直接 spawn，不经过 Windows .cmd 解析，
+//   因此在「受管 / 便携版 Node」（如本工作区捆绑的 Node 22.22.2）上也能稳定连上。
+//
+// 备选（仅标准 Node 安装可用）：若你的 Node 能自动解析 .cmd shim，可用社区标准写法：
+//   "command": "npx",
+//   "args": ["-y", "github:dhicoc/codex-web-search-mcp"]
+//   注意：在受管 / 便携 Node 上会报 `spawn npx ENOENT` → 30s 超时，请勿用于此类环境。
+//
+// 绝对不要用：`"command": "cmd", "args": ["/c", ...]` —— 会破坏 MCP stdio 管道导致超时 / -32000。
