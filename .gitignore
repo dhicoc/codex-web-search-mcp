@@ -1,0 +1,14 @@
+# Local MCP config containing absolute paths — keep the .example instead
+.mcp.json
+
+# Dependencies (this project is zero-dependency)
+node_modules/
+
+# Local env / secrets
+.env
+.env.local
+
+# Logs / OS noise
+*.log
+.DS_Store
+Thumbs.db

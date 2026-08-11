@@ -1,0 +1,33 @@
+{
+  "name": "codex-web-search-mcp",
+  "version": "1.1.0",
+  "description": "Model-independent web search & deep research MCP server for Claude Code, powered by OpenAI Codex's standalone search endpoint. Works with any model (Gemini / OpenRouter / local) and bypasses native WebSearch's Anthropic lock-in.",
+  "type": "commonjs",
+  "bin": {
+    "codex-web-search-mcp": "codex-web-search-mcp.js"
+  },
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "claude",
+    "web-search",
+    "codex",
+    "openai",
+    "deep-research",
+    "model-independent"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dhicoc/codex-web-search-mcp.git"
+  },
+  "homepage": "https://github.com/dhicoc/codex-web-search-mcp#readme",
+  "files": [
+    "codex-web-search-mcp.js",
+    "README.md",
+    "LICENSE"
+  ]
+}

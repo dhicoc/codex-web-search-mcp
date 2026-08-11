@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "codex-web-search": {
+      "command": "node",
+      "args": [
+        "/absolute/path/to/codex-web-search-mcp.js"
+      ]
+    }
+  }
+}
