@@ -52,23 +52,38 @@ Claude Code（任意模型）
 
 ## 安装与配置（Claude Code）
 
-> ⚠️ **Windows 关键坑（已踩过两次）**：Claude Code 在 Windows 上**直接 exec `command`，不套 shell**，所以两类写法都会失败：
-> 1. **裸 `.cmd` 命令**（`"command": "npx"` 或 `"command": "codex-web-search-mcp"`）——Windows 无法不经 shell 直接跑 `.cmd`，报 `Failed to reconnect ... -32000`（连接已关闭）。
-> 2. **`cmd /c` 包裹**（`"command": "cmd", "args": ["/c", ...]`）——破坏 MCP 的 stdio 管道，握手超时 `connection timed out after 30000ms`。
-> ✅ **Windows 唯一可靠写法**：`"command": "node"` + `"args": ["<脚本绝对路径>"]`（见下方方式 A）。
-> macOS / Linux 无 `.cmd` 问题，裸命令 `codex-web-search-mcp` 可直接用。
+> ⚠️ **Windows 配置要点（实测澄清，避免误判）**：
+> 1. **唯一致命错误：手动用 `cmd /c` 包裹命令**（`"command": "cmd", "args": ["/c", ...]`）。这会破坏 MCP 的 stdio 管道，导致握手超时 `connection timed out after 30000ms` 或 `-32000`。Claude Code 自己会直接拉起 `command`，**不能、也不需要**再套一层 shell。
+> 2. **`npx -y <pkg>` 是社区标准写法，Windows 同样可用**。Claude Code 启动 `command: "npx"` 时，Node 底层会自动以正确方式执行 `.cmd` 且 stdio 直连——官方 MCP server（filesystem / puppeteer 等）在 Windows 上全这么配且工作正常。本仓库推荐直接这么用（见方式 A）。
+> 3. **极少数环境**（系统只装了 `npx.ps1` 而没有 `npx.cmd`）裸 `npx` 会 `ENOENT`；此时改用下方 Windows 兜底写法 `node + 脚本绝对路径` 即可。
+> 4. **若 `/mcp` 报 `-32000`：先彻底退出并重启 Claude Code**——多数是编辑配置后旧会话残留，并非配置本身错误；仍失败再按上面兜底处理。
 
-### 方式 A：GitHub 全局安装（★ 推荐，无需 npm 账号 / 密码）
+### 方式 A：GitHub 安装（★ 推荐，无需 npm 账号 / 密码）
 
-`npm` 支持**直接从 GitHub 仓库安装**——不用注册/登录 npm，也不用把包装到 npmjs.com。
+`npm` / `npx` 都支持**直接从 GitHub 仓库安装**——不用注册/登录 npm，也不用把包装到 npmjs.com。
+
+**首选（全平台通用，也是 MCP 社区标准写法）：**
+
+```json
+{
+  "mcpServers": {
+    "codex-web-search": {
+      "command": "npx",
+      "args": ["-y", "github:dhicoc/codex-web-search-mcp"]
+    }
+  }
+}
+```
+
+> 这是 Anthropic / 社区官方 server 的通用配置方式，Windows（Claude Code 经 Node 自动处理 `.cmd`）+ macOS + Linux **均可用**。首次运行 `npx` 会从 GitHub 拉取最新提交并缓存，之后走本地缓存、启动很快。
+
+**Windows 兜底（若上面报 `-32000` / `ENOENT`，或想要零冷启动延迟）：**
+
+先全局安装，再用 `node` 指向脚本绝对路径：
 
 ```bash
 npm install -g github:dhicoc/codex-web-search-mcp
 ```
-
-装完后，按操作系统填 `.mcp.json`（或 `~/.claude.json` 的 `mcpServers`）：
-
-**Windows（必须用 `node` + 脚本绝对路径，不能用裸命令）：**
 
 ```json
 {
@@ -81,12 +96,11 @@ npm install -g github:dhicoc/codex-web-search-mcp
 }
 ```
 
-> 脚本所在的 `node_modules` 目录可用 `npm root -g` 查到（Windows 一般是
-> `C:/Users/<用户名>/.workbuddy/binaries/node/versions/<版本>/node_modules`）。
+> 脚本路径用 `npm root -g` 查到（`C:/Users/<用户名>/.workbuddy/binaries/node/versions/<版本>/node_modules`）。
 > 不想写死版本号，可在 PowerShell 先执行
 > `$p = "$(npm root -g)/codex-web-search-mcp/codex-web-search-mcp.js"` 拿到路径再粘进 args。
 
-**macOS / Linux（裸命令即可，bin 是带 shebang 的符号链接）：**
+**macOS / Linux 另一种写法（裸命令，需先全局安装）：**
 
 ```json
 {
@@ -98,7 +112,7 @@ npm install -g github:dhicoc/codex-web-search-mcp
 }
 ```
 
-- 升级：重新 `npm install -g github:dhicoc/codex-web-search-mcp` 即拉取最新提交。
+- 升级：重新跑上面的安装命令即拉取最新提交。
 - 把同样内容写进用户级 `~/.claude.json` 的 `mcpServers`，即可对所有项目生效。
 
 ### 方式 B：从源码运行（开发 / 调试用）
@@ -186,8 +200,8 @@ npm publish
 | `Codex 凭证已过期（HTTP 401/403）` | 会话过期，重新 `codex login` |
 | `触发 Codex 速率限制（HTTP 429）` | 稍后重试，或减少调用频率 |
 | `/mcp` 里显示未连接 | 检查 `node` 是否在 PATH、路径是否正确、JSON 是否合法 |
-| `/mcp` 报 `connection timed out after 30000ms` | **Windows 上配置用了 `cmd /c` 包裹命令**，破坏了 MCP stdio 管道。改成 `node + 脚本绝对路径`（见上方方式 A） |
-| `/mcp` 报 `Failed to reconnect ... -32000` | **Windows 上用了裸 `.cmd` 命令**（`command: "npx"` 或 `command: "codex-web-search-mcp"`）。Windows 无法不经 shell 直接执行 `.cmd`，连接立即关闭。改成 `command: "node"` + `args: ["<全局脚本绝对路径>"]` |
+| `/mcp` 报 `connection timed out after 30000ms` | 配置里**手动用了 shell 包裹命令**（如 `"command": "cmd", "args": ["/c", ...]`），破坏了 MCP stdio 管道。删掉包裹，改用 `command: "npx"` + `args: ["-y","github:dhicoc/codex-web-search-mcp"]`（或 Windows 兜底 `node + 脚本绝对路径`） |
+| `/mcp` 报 `Failed to reconnect ... -32000` | 多为**编辑配置后旧会话残留**——彻底退出并重启 Claude Code 即可。若仍失败：检查是否误用了 shell 包裹（`cmd /c`），应改成裸 `npx` 或 `node + 脚本路径`；极少数只装 `npx.ps1` 的环境裸 `npx` 会 `ENOENT`，改用 Windows 兜底写法 |
 
 调试时可设环境变量 `CODEX_SEARCH_DEBUG=1`，server 启动时会向 stderr 打印日志。
 
