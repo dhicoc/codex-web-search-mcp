@@ -44,11 +44,48 @@ Claude Code（任意模型）
 ## 依赖与环境
 
 1. **Node.js** v18+（v22 已自带全局 `fetch`，无需安装任何 npm 包）。
-2. **Codex 登录凭证**，二选一：
-   - 运行过 `codex login`（会在 `~/.codex/auth.json` 写入 `tokens.access_token`）；
-   - 或设置环境变量 `CODEX_ACCESS_TOKEN`（可选 `CODEX_ACCOUNT_ID`）。
+2. **有效的 Codex 登录凭证（必做）**——本工具直连 Codex 搜索端点，必须有登录态才能用，否则工具会返回清晰的报错而不是崩溃。凭证二选一：
+   - **方式 1（推荐，零手动配置）**：运行 `codex login`，由 OAuth 自动把 token 写入 `~/.codex/auth.json`；
+   - **方式 2（免 auth.json）**：设置环境变量 `CODEX_ACCESS_TOKEN`（可选 `CODEX_ACCOUNT_ID`）。
 
-> 没有 ChatGPT/Codex 账号或会话过期时，工具会返回清晰的中文报错，而不是崩溃。
+> 没有 ChatGPT/Codex 账号、未登录、或会话过期（`401/403`）时，工具会返回明确的中文报错，而不是崩溃——按下面步骤补上凭证即可。
+
+### 获取 Codex 凭证（必做）
+
+> **不必手动编写 `auth.json`**：它是 `codex login` 的 OAuth 产物（里面是颁发的 token），手搓无效。让 `codex login` 自动生成，或改用环境变量方式。
+
+**方式 1：`codex login`（推荐，自动生成 auth.json）**
+
+1. 安装 Codex CLI（仅需装一次）：
+   ```bash
+   npm install -g @openai/codex
+   ```
+   > 国内网络卡可加镜像：`npm install -g @openai/codex --registry=https://registry.npmmirror.com`
+2. 登录（会打开浏览器走 ChatGPT/OpenAI OAuth）：
+   ```bash
+   codex login
+   ```
+3. 登录成功后自动写入 `~/.codex/auth.json`（含 `tokens.access_token` / `tokens.account_id`）。**本 server 会自动读取，无需任何额外配置。**
+4. 验证：`cat ~/.codex/auth.json` 能看到 `tokens` 字段即成功。
+
+**方式 2：环境变量 `CODEX_ACCESS_TOKEN`（免 auth.json）**
+
+不想装 Codex CLI、或想在服务器 / CI 上用：直接提供 token 即可，无需 auth.json。
+
+```bash
+# Windows PowerShell（仅当前会话）
+$env:CODEX_ACCESS_TOKEN = "你的token"
+$env:CODEX_ACCOUNT_ID  = "你的account_id"   # 可选，部分端点需要
+
+# macOS / Linux
+export CODEX_ACCESS_TOKEN="你的token"
+export CODEX_ACCOUNT_ID="你的account_id"     # 可选
+```
+
+- 想让 Claude Code 每次启动都带上，可把上面的 `export` 写进 shell 配置文件（`~/.zshrc` / `~/.bashrc`），或在 Claude Code 的 MCP 配置里加 `"env": { "CODEX_ACCESS_TOKEN": "..." }`。
+- `account_id` 可从方式 1 生成的 `~/.codex/auth.json` 的 `tokens.account_id` 字段抄过来（有时端点需要它来区分账号）。
+
+> 凭证过期（`401/403`）时：方式 1 重新 `codex login`；方式 2 换一个新 token。
 
 ## 安装与配置（Claude Code）
 
