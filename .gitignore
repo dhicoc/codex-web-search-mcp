@@ -8,6 +8,14 @@ node_modules/
 .env
 .env.local
 
+# Codex credentials — never commit (~/.codex/auth.json holds the access token).
+# These are defensive: the real auth.json lives in the user HOME, outside this repo,
+# but block it here in case it's ever copied in for local testing.
+auth.json
+.codex/
+*.codex/auth.json
+codex-auth*.json
+
 # Logs / OS noise
 *.log
 .DS_Store
