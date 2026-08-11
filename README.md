@@ -52,10 +52,10 @@ Claude Code（任意模型）
 
 ## 安装与配置（Claude Code）
 
-### 方式 A：npx 安装（★ 推荐，无需指定 node 路径）
+### 方式 A：从 GitHub 安装（★ 推荐，无需 npm 账号 / 密码）
 
-这是与官方 `@modelcontextprotocol/server-*` 等主流 MCP server 一致的分发方式：
-包发布在 npm 上，Claude Code 用 `npx` 自动拉取并运行——**你完全不用写 node.exe 路径，也不用 clone 仓库**。
+`npx` 和 `npm` 都支持**直接从 GitHub 仓库安装**——所以你既不用注册/登录 npm，也不用把包装到 npmjs.com。
+本仓库已验证可这样安装（`npm pack github:dhicoc/codex-web-search-mcp` 通过，含 `bin` 正常解析）。
 
 在项目根（或任意位置）创建 `.mcp.json`：
 
@@ -64,20 +64,23 @@ Claude Code（任意模型）
   "mcpServers": {
     "codex-web-search": {
       "command": "npx",
-      "args": ["-y", "codex-web-search-mcp"]
+      "args": ["-y", "github:dhicoc/codex-web-search-mcp"]
     }
   }
 }
 ```
 
-- `npx -y` 首次会自动下载并运行最新版，之后走本地缓存；无 node 路径、无绝对路径。
-- 升级：把包名写成 `codex-web-search-mcp@latest`，或重新执行 `npx -y codex-web-search-mcp` 即可。
-- 把同样的内容写进用户级 `~/.claude.json` 的 `mcpServers`，即可对所有项目生效。
+- 首次会自动 clone 并运行，之后走 npx 本地缓存；**无需 node 路径、无需手动 clone 到本地**。
+- 运行时会执行仓库里的 `bin`（`codex-web-search-mcp.js`，含 `#!/usr/bin/env node` shebang），所以不用你指定 node 路径。
+- 升级：重新执行 `npx -y github:dhicoc/codex-web-search-mcp`（或下面方式 B 的全局安装）即拉取最新提交。
+- 把同样内容写进用户级 `~/.claude.json` 的 `mcpServers`，即可对所有项目生效。
 
 ### 方式 B：全局安装后用命令名（可选）
 
+从 GitHub 全局安装：
+
 ```bash
-npm install -g codex-web-search-mcp
+npm install -g github:dhicoc/codex-web-search-mcp
 ```
 
 随后在 `.mcp.json` 里直接用命令名（同样无需 node 路径）：
@@ -108,6 +111,22 @@ npm install -g codex-web-search-mcp
 ```
 
 > 首次在 Claude Code 里运行 `/mcp` 查看是否连上，首次会要求批准；改完重启 Claude Code 即可。
+
+### 发布到 npm（可选，获得更短的命令名）
+
+如果你想要不带 `github:` 前缀的 `npx -y codex-web-search-mcp`（更易记），需要把包装到 npmjs.com。
+这需要你有一个 npm 账号——**没有账号或忘了密码都不影响上面三种用法**，只是短命令名要用：
+
+- 没账号：去 https://www.npmjs.com/signup 免费注册一个；
+- 忘了密码：去 https://www.npmjs.com/forgot-password 用注册邮箱重置；
+- 登录官方源后发布（本仓库 `package.json` 的 `publishConfig` 已锁定官方源）：
+
+```bash
+npm login --registry https://registry.npmjs.org/
+npm publish
+```
+
+包名 `codex-web-search-mcp` 已确认未被占用。
 
 ## 使用
 

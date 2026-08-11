@@ -2,7 +2,7 @@
   "mcpServers": {
     "codex-web-search": {
       "command": "npx",
-      "args": ["-y", "codex-web-search-mcp"]
+      "args": ["-y", "github:dhicoc/codex-web-search-mcp"]
     }
   }
 }
