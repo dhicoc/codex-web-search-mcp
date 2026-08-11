@@ -52,45 +52,41 @@ Claude Code（任意模型）
 
 ## 安装与配置（Claude Code）
 
-> ⚠️ **Windows 关键坑（已踩过）**：配置里**千万不要用 `cmd /c` 包裹命令**（例如 `"command": "cmd", "args": ["/c", "npx", ...]`）。
-> `cmd /c` 会破坏 MCP 的 stdio 管道，导致 Claude Code 握手超时，报错
-> `Failed to reconnect ... connection timed out after 30000ms`。
-> **Claude Code 会自己直接拉起 `command`**，所以 `command` 直接写裸命令名即可——
-> `"command": "npx"` / `"command": "codex-web-search-mcp"` / `"command": "node"`，**不要套 `cmd /c`**。
-> 本仓库下面的三种方式都没有 `cmd /c`，照抄即可。
+> ⚠️ **Windows 关键坑（已踩过两次）**：Claude Code 在 Windows 上**直接 exec `command`，不套 shell**，所以两类写法都会失败：
+> 1. **裸 `.cmd` 命令**（`"command": "npx"` 或 `"command": "codex-web-search-mcp"`）——Windows 无法不经 shell 直接跑 `.cmd`，报 `Failed to reconnect ... -32000`（连接已关闭）。
+> 2. **`cmd /c` 包裹**（`"command": "cmd", "args": ["/c", ...]`）——破坏 MCP 的 stdio 管道，握手超时 `connection timed out after 30000ms`。
+> ✅ **Windows 唯一可靠写法**：`"command": "node"` + `"args": ["<脚本绝对路径>"]`（见下方方式 A）。
+> macOS / Linux 无 `.cmd` 问题，裸命令 `codex-web-search-mcp` 可直接用。
 
-### 方式 A：从 GitHub 安装（★ 推荐，无需 npm 账号 / 密码）
+### 方式 A：GitHub 全局安装（★ 推荐，无需 npm 账号 / 密码）
 
-`npx` 和 `npm` 都支持**直接从 GitHub 仓库安装**——所以你既不用注册/登录 npm，也不用把包装到 npmjs.com。
-本仓库已验证可这样安装（`npm pack github:dhicoc/codex-web-search-mcp` 通过，含 `bin` 正常解析）。
-
-在项目根（或任意位置）创建 `.mcp.json`：
-
-```json
-{
-  "mcpServers": {
-    "codex-web-search": {
-      "command": "npx",
-      "args": ["-y", "github:dhicoc/codex-web-search-mcp"]
-    }
-  }
-}
-```
-
-- 首次会自动 clone 并运行，之后走 npx 本地缓存；**无需 node 路径、无需手动 clone 到本地**。
-- 运行时会执行仓库里的 `bin`（`codex-web-search-mcp.js`，含 `#!/usr/bin/env node` shebang），所以不用你指定 node 路径。
-- 升级：重新执行 `npx -y github:dhicoc/codex-web-search-mcp`（或下面方式 B 的全局安装）即拉取最新提交。
-- 把同样内容写进用户级 `~/.claude.json` 的 `mcpServers`，即可对所有项目生效。
-
-### 方式 B：全局安装后用命令名（可选）
-
-从 GitHub 全局安装：
+`npm` 支持**直接从 GitHub 仓库安装**——不用注册/登录 npm，也不用把包装到 npmjs.com。
 
 ```bash
 npm install -g github:dhicoc/codex-web-search-mcp
 ```
 
-随后在 `.mcp.json` 里直接用命令名（同样无需 node 路径）：
+装完后，按操作系统填 `.mcp.json`（或 `~/.claude.json` 的 `mcpServers`）：
+
+**Windows（必须用 `node` + 脚本绝对路径，不能用裸命令）：**
+
+```json
+{
+  "mcpServers": {
+    "codex-web-search": {
+      "command": "node",
+      "args": ["C:/Users/你的用户名/.workbuddy/binaries/node/versions/22.22.2/node_modules/codex-web-search-mcp/codex-web-search-mcp.js"]
+    }
+  }
+}
+```
+
+> 脚本所在的 `node_modules` 目录可用 `npm root -g` 查到（Windows 一般是
+> `C:/Users/<用户名>/.workbuddy/binaries/node/versions/<版本>/node_modules`）。
+> 不想写死版本号，可在 PowerShell 先执行
+> `$p = "$(npm root -g)/codex-web-search-mcp/codex-web-search-mcp.js"` 拿到路径再粘进 args。
+
+**macOS / Linux（裸命令即可，bin 是带 shebang 的符号链接）：**
 
 ```json
 {
@@ -102,9 +98,12 @@ npm install -g github:dhicoc/codex-web-search-mcp
 }
 ```
 
-### 方式 C：从源码运行（开发 / 调试用）
+- 升级：重新 `npm install -g github:dhicoc/codex-web-search-mcp` 即拉取最新提交。
+- 把同样内容写进用户级 `~/.claude.json` 的 `mcpServers`，即可对所有项目生效。
 
-把本仓库 clone / 下载下来，在 `.mcp.json` 里用 `node` 指向脚本绝对路径：
+### 方式 B：从源码运行（开发 / 调试用）
+
+把本仓库 clone / 下载下来，用 `node` 指向脚本绝对路径（跨平台一致，天然避开 `.cmd` 问题）：
 
 ```json
 {
@@ -122,7 +121,7 @@ npm install -g github:dhicoc/codex-web-search-mcp
 ### 发布到 npm（可选，获得更短的命令名）
 
 如果你想要不带 `github:` 前缀的 `npx -y codex-web-search-mcp`（更易记），需要把包装到 npmjs.com。
-这需要你有一个 npm 账号——**没有账号或忘了密码都不影响上面三种用法**，只是短命令名要用：
+这需要你有一个 npm 账号——**没有账号或忘了密码都不影响上面两种方式**，只是短命令名要用：
 
 - 没账号：去 https://www.npmjs.com/signup 免费注册一个；
 - 忘了密码：去 https://www.npmjs.com/forgot-password 用注册邮箱重置；
@@ -187,7 +186,8 @@ npm publish
 | `Codex 凭证已过期（HTTP 401/403）` | 会话过期，重新 `codex login` |
 | `触发 Codex 速率限制（HTTP 429）` | 稍后重试，或减少调用频率 |
 | `/mcp` 里显示未连接 | 检查 `node` 是否在 PATH、路径是否正确、JSON 是否合法 |
-| `/mcp` 报 `connection timed out after 30000ms` | **Windows 上配置用了 `cmd /c` 包裹命令**，破坏了 MCP stdio 管道。改成裸命令（`npx` / `codex-web-search-mcp` / `node`），去掉 `cmd /c` |
+| `/mcp` 报 `connection timed out after 30000ms` | **Windows 上配置用了 `cmd /c` 包裹命令**，破坏了 MCP stdio 管道。改成 `node + 脚本绝对路径`（见上方方式 A） |
+| `/mcp` 报 `Failed to reconnect ... -32000` | **Windows 上用了裸 `.cmd` 命令**（`command: "npx"` 或 `command: "codex-web-search-mcp"`）。Windows 无法不经 shell 直接执行 `.cmd`，连接立即关闭。改成 `command: "node"` + `args: ["<全局脚本绝对路径>"]` |
 
 调试时可设环境变量 `CODEX_SEARCH_DEBUG=1`，server 启动时会向 stderr 打印日志。
 
