@@ -52,9 +52,49 @@ Claude Code（任意模型）
 
 ## 安装与配置（Claude Code）
 
-### 方式 A：项目级（推荐先在单个项目验证）
+### 方式 A：npx 安装（★ 推荐，无需指定 node 路径）
 
-把本目录放到你的项目里，或直接复用本目录，在项目根创建 `.mcp.json`：
+这是与官方 `@modelcontextprotocol/server-*` 等主流 MCP server 一致的分发方式：
+包发布在 npm 上，Claude Code 用 `npx` 自动拉取并运行——**你完全不用写 node.exe 路径，也不用 clone 仓库**。
+
+在项目根（或任意位置）创建 `.mcp.json`：
+
+```json
+{
+  "mcpServers": {
+    "codex-web-search": {
+      "command": "npx",
+      "args": ["-y", "codex-web-search-mcp"]
+    }
+  }
+}
+```
+
+- `npx -y` 首次会自动下载并运行最新版，之后走本地缓存；无 node 路径、无绝对路径。
+- 升级：把包名写成 `codex-web-search-mcp@latest`，或重新执行 `npx -y codex-web-search-mcp` 即可。
+- 把同样的内容写进用户级 `~/.claude.json` 的 `mcpServers`，即可对所有项目生效。
+
+### 方式 B：全局安装后用命令名（可选）
+
+```bash
+npm install -g codex-web-search-mcp
+```
+
+随后在 `.mcp.json` 里直接用命令名（同样无需 node 路径）：
+
+```json
+{
+  "mcpServers": {
+    "codex-web-search": {
+      "command": "codex-web-search-mcp"
+    }
+  }
+}
+```
+
+### 方式 C：从源码运行（开发 / 调试用）
+
+把本仓库 clone / 下载下来，在 `.mcp.json` 里用 `node` 指向脚本绝对路径：
 
 ```json
 {
@@ -67,24 +107,7 @@ Claude Code（任意模型）
 }
 ```
 
-然后在 Claude Code 里运行 `/mcp` 查看是否连上，首次会要求批准。
-
-### 方式 B：用户级（所有项目可用）
-
-编辑 `~/.claude.json`，在 `mcpServers` 下加入同样的内容（注意 JSON 里路径用正斜杠或双反斜杠）：
-
-```json
-{
-  "mcpServers": {
-    "codex-web-search": {
-      "command": "node",
-      "args": ["/absolute/path/to/codex-web-search-mcp.js"]
-    }
-  }
-}
-```
-
-改完重启 Claude Code 即可。
+> 首次在 Claude Code 里运行 `/mcp` 查看是否连上，首次会要求批准；改完重启 Claude Code 即可。
 
 ## 使用
 

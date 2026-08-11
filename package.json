@@ -25,6 +25,15 @@
     "url": "https://github.com/dhicoc/codex-web-search-mcp.git"
   },
   "homepage": "https://github.com/dhicoc/codex-web-search-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/dhicoc/codex-web-search-mcp/issues"
+  },
+  "scripts": {
+    "start": "node codex-web-search-mcp.js"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
   "files": [
     "codex-web-search-mcp.js",
     "README.md",

@@ -1,10 +1,8 @@
 {
   "mcpServers": {
     "codex-web-search": {
-      "command": "node",
-      "args": [
-        "/absolute/path/to/codex-web-search-mcp.js"
-      ]
+      "command": "npx",
+      "args": ["-y", "codex-web-search-mcp"]
     }
   }
 }
