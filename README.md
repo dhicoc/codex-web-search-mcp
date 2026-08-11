@@ -52,6 +52,13 @@ Claude Code（任意模型）
 
 ## 安装与配置（Claude Code）
 
+> ⚠️ **Windows 关键坑（已踩过）**：配置里**千万不要用 `cmd /c` 包裹命令**（例如 `"command": "cmd", "args": ["/c", "npx", ...]`）。
+> `cmd /c` 会破坏 MCP 的 stdio 管道，导致 Claude Code 握手超时，报错
+> `Failed to reconnect ... connection timed out after 30000ms`。
+> **Claude Code 会自己直接拉起 `command`**，所以 `command` 直接写裸命令名即可——
+> `"command": "npx"` / `"command": "codex-web-search-mcp"` / `"command": "node"`，**不要套 `cmd /c`**。
+> 本仓库下面的三种方式都没有 `cmd /c`，照抄即可。
+
 ### 方式 A：从 GitHub 安装（★ 推荐，无需 npm 账号 / 密码）
 
 `npx` 和 `npm` 都支持**直接从 GitHub 仓库安装**——所以你既不用注册/登录 npm，也不用把包装到 npmjs.com。
@@ -180,6 +187,7 @@ npm publish
 | `Codex 凭证已过期（HTTP 401/403）` | 会话过期，重新 `codex login` |
 | `触发 Codex 速率限制（HTTP 429）` | 稍后重试，或减少调用频率 |
 | `/mcp` 里显示未连接 | 检查 `node` 是否在 PATH、路径是否正确、JSON 是否合法 |
+| `/mcp` 报 `connection timed out after 30000ms` | **Windows 上配置用了 `cmd /c` 包裹命令**，破坏了 MCP stdio 管道。改成裸命令（`npx` / `codex-web-search-mcp` / `node`），去掉 `cmd /c` |
 
 调试时可设环境变量 `CODEX_SEARCH_DEBUG=1`，server 启动时会向 stderr 打印日志。
 
