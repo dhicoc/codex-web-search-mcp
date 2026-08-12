@@ -1,0 +1,176 @@
+name: release
+
+# Builds the Rust binary for every supported platform, publishes each as a
+# scoped npm platform package, then publishes the meta `codex-web-search-mcp`
+# package (which pulls in only the matching binary via optionalDependencies).
+# Finally attaches the binaries to a GitHub Release.
+#
+# Trigger: push a tag `vX.Y.Z`, or run manually from Actions with a version.
+#
+# Required repo secret:
+#   NPM_TOKEN  — an npm automation/publish token (https://www.npmjs.com/settings/<user>/tokens)
+#
+# NOTE: the platform sub-packages are scoped under @dhicoc. If your npm account
+# is not `dhicoc`, rename the scope in npm/codex-web-search-mcp/package.json
+# (optionalDependencies) and in each npm/platforms/*/package.json (name).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 2.0.1)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64,        os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  targets: "x86_64-unknown-linux-gnu" }
+          - { platform: linux-arm64,      os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, targets: "aarch64-unknown-linux-gnu", use-cross: true }
+          - { platform: darwin-universal, os: macos-latest,   target: universal,                targets: "x86_64-apple-darwin,aarch64-apple-darwin" }
+          - { platform: win32-x64,        os: windows-latest, target: x86_64-pc-windows-msvc,   targets: "x86_64-pc-windows-msvc" }
+          - { platform: win32-arm64,      os: windows-latest, target: aarch64-pc-windows-msvc,  targets: "aarch64-pc-windows-msvc" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.targets }}
+
+      - name: Install cross (linux-arm64)
+        if: matrix.use-cross
+        run: cargo install cross --locked
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Bump versions
+        run: node scripts/set-version.js ${{ steps.ver.outputs.version }}
+        shell: bash
+
+      - name: Build (native)
+        if: ${{ !matrix.use-cross && matrix.target != 'universal' }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.use-cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (darwin universal)
+        if: matrix.target == 'universal'
+        shell: bash
+        run: |
+          rustup target add x86_64-apple-darwin aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          cargo build --release --target aarch64-apple-darwin
+          mkdir -p target/universal
+          lipo -create -output target/universal/codex-web-search-mcp \
+            target/x86_64-apple-darwin/release/codex-web-search-mcp \
+            target/aarch64-apple-darwin/release/codex-web-search-mcp
+
+      - name: Stage binary into npm platform package
+        shell: bash
+        run: |
+          DIR="npm/platforms/${{ matrix.platform }}/bin"
+          mkdir -p "$DIR"
+          if [ "${{ matrix.platform }}" = "win32-x64" ] || [ "${{ matrix.platform }}" = "win32-arm64" ]; then
+            BIN="codex-web-search-mcp.exe"
+            SRC="target/${{ matrix.target }}/release/codex-web-search-mcp.exe"
+          elif [ "${{ matrix.platform }}" = "darwin-universal" ]; then
+            BIN="codex-web-search-mcp"
+            SRC="target/universal/codex-web-search-mcp"
+          else
+            BIN="codex-web-search-mcp"
+            SRC="target/${{ matrix.target }}/release/codex-web-search-mcp"
+          fi
+          cp "$SRC" "$DIR/$BIN"
+          ls -la "$DIR"
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.platform }}
+          path: npm/platforms/${{ matrix.platform }}/bin/*
+
+      - name: Publish platform package
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd "npm/platforms/${{ matrix.platform }}"
+          npm config set //registry.npmjs.org/:_authToken="$NODE_AUTH_TOKEN"
+          npm publish --access public
+
+  publish-root:
+    name: publish meta package
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Bump versions
+        run: node scripts/set-version.js ${{ steps.ver.outputs.version }}
+        shell: bash
+      - name: Publish meta package
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          cd npm/codex-web-search-mcp
+          npm config set //registry.npmjs.org/:_authToken="$NODE_AUTH_TOKEN"
+          npm publish --access public
+
+  github-release:
+    name: github release
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: v${{ steps.ver.outputs.version }}
+          files: artifacts/**/codex-web-search-mcp*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

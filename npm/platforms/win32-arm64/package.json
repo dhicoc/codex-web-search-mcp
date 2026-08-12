@@ -1,0 +1,22 @@
+{
+  "name": "@dhicoc/codex-web-search-mcp-win32-arm64",
+  "version": "2.0.0",
+  "description": "Windows arm64 (aarch64) binary for codex-web-search-mcp",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dhicoc/codex-web-search-mcp.git"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/codex-web-search-mcp.exe"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

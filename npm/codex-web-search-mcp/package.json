@@ -1,0 +1,54 @@
+{
+  "name": "codex-web-search-mcp",
+  "version": "2.0.0",
+  "description": "Model-independent web search & deep research MCP server (Rust). Backends: OpenAI Codex (default, free with ChatGPT login) and optional Grok/xAI. Tools: web_search, web_research, web_fetch, get_sources (pagination/budget), doctor, web_map. Ships a standalone native binary — no Node runtime required.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dhicoc/codex-web-search-mcp.git"
+  },
+  "author": "dhicoc",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/dhicoc/codex-web-search-mcp/issues"
+  },
+  "homepage": "https://github.com/dhicoc/codex-web-search-mcp#readme",
+  "keywords": [
+    "mcp",
+    "claude-code",
+    "web-search",
+    "codex",
+    "grok",
+    "openai",
+    "deep-research",
+    "model-independent",
+    "rust"
+  ],
+  "bin": {
+    "codex-web-search-mcp": "run.js"
+  },
+  "files": [
+    "run.js"
+  ],
+  "engines": {
+    "node": ">=14.14.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "optionalDependencies": {
+    "@dhicoc/codex-web-search-mcp-darwin-universal": "2.0.0",
+    "@dhicoc/codex-web-search-mcp-linux-x64": "2.0.0",
+    "@dhicoc/codex-web-search-mcp-linux-arm64": "2.0.0",
+    "@dhicoc/codex-web-search-mcp-win32-x64": "2.0.0",
+    "@dhicoc/codex-web-search-mcp-win32-arm64": "2.0.0"
+  }
+}

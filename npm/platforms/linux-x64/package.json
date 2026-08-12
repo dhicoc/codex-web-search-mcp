@@ -1,0 +1,22 @@
+{
+  "name": "@dhicoc/codex-web-search-mcp-linux-x64",
+  "version": "2.0.0",
+  "description": "Linux x64 binary for codex-web-search-mcp",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dhicoc/codex-web-search-mcp.git"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/codex-web-search-mcp"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -98,6 +98,21 @@ export CODEX_ACCOUNT_ID="你的account_id"     # 可选
 
 > 凭证过期（`401/403`）：方式 1 重新 `codex login`；方式 2 换新 token。
 
+## 安装（开箱即用，推荐）
+
+本项目通过 npm 分发**预编译的原生二进制**——你不需要安装 Rust，一条命令即可：
+
+```bash
+npm install -g codex-web-search-mcp
+```
+
+`codex-web-search-mcp` 命令本质是个 Node 薄壳（`npm/codex-web-search-mcp/run.js`），它按当前平台从对应的
+`@dhicoc/codex-web-search-mcp-<platform>` 子包里取出预编译好的 Rust 二进制并启动。npm 只会下载与你平台
+匹配的那一份二进制（macOS 用通用包，Windows/Linux 分 x64/arm64）。装好后把 MCP `command` 设为
+`codex-web-search-mcp` 即可（见下「安装与配置（MCP）」）。
+
+> 没有 npm 环境、或想自己构建，见下「编译（Build）」+「方式 B」。
+
 ## 编译（Build）
 
 ### Windows（MSVC）
@@ -122,7 +137,29 @@ cargo build --release
 
 ## 安装与配置（MCP）
 
-Rust 版是**独立二进制**，直接让客户端 spawn 这个 exe（或 macOS/Linux 下的二进制）即可，**不需要 Node**。
+### 方式 A：npm 全局安装（开箱即用，推荐）
+
+无需 Rust、无需手动编译，一条命令装好跨平台预编译二进制：
+
+```bash
+npm install -g codex-web-search-mcp
+```
+
+MCP 配置（客户端直接 spawn `codex-web-search-mcp` 命令即可）：
+
+```json
+{
+  "mcpServers": {
+    "codex-web-search": {
+      "command": "codex-web-search-mcp"
+    }
+  }
+}
+```
+
+### 方式 B：从源码编译（无 npm / 想自己构建）
+
+Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 exe（或 macOS/Linux 下的二进制）即可，**不需要 Node**。
 
 ```json
 {
@@ -135,6 +172,7 @@ Rust 版是**独立二进制**，直接让客户端 spawn 这个 exe（或 macOS
 ```
 
 - macOS / Linux：把 `command` 换成 `/path/to/codex-web-search-mcp/target/release/codex-web-search-mcp`。
+- 编译步骤见下「编译（Build）」。
 - 改完重启客户端即可；首次在客户端里查看是否连上（如 Claude Code 的 `/mcp`）。
 - 写入用户级配置（如 `~/.claude.json`）的 `mcpServers` 即对所有项目生效。
 
@@ -145,9 +183,9 @@ Rust 版是**独立二进制**，直接让客户端 spawn 这个 exe（或 macOS
 
 ### 旧版 Node 脚本（已弃用，保留作兜底）
 
-仓库里仍保留 `codex-web-search-mcp.js`（v1.x 单文件 Node 版）。如需用 Node 方式运行，参考旧 README
-的「方式 A / B」（`node` + 脚本绝对路径，或 `npx -y github:dhicoc/codex-web-search-mcp`）。**推荐用
-Rust 版**，无需 Node 且功能更全。
+仓库里仍保留 `codex-web-search-mcp.js`（v1.x 单文件 Node 版）。如需用 Node 方式运行，可
+`node codex-web-search-mcp.js` 或 `npx -y github:dhicoc/codex-web-search-mcp`。**推荐用上面的 Rust 版**
+（方式 A 开箱即用，或方式 B 自编译），功能更全且无需 Node。
 
 ## 配置（config.toml）
 
@@ -256,6 +294,18 @@ max_inline_sources = 10           # 结果里最多内联展示的来源条数
 | 后端 | Codex | Codex | Codex + **可选 Grok/xAI** |
 | 工具数 | search/research | 2 | **6**（新增 web_fetch/get_sources/doctor/web_map） |
 | 预算/分页 | — | — | **response_max_chars / max_inline_sources / get_sources** |
+
+## 发布（维护者）
+
+开箱即用的 npm 包由 GitHub Actions 自动构建发布（`.github/workflows/release.yml`）：
+
+1. 在仓库 **Settings → Secrets** 里配置 `NPM_TOKEN`（npm 发布 token，需 publish 权限）。
+2. 打 tag 并推送：`git tag v2.0.1 && git push origin v2.0.1`（也可用 Actions 页面的 `workflow_dispatch` 手动触发并填版本号）。
+3. CI 会自动：跨平台编译 → 发布 5 个 `@dhicoc/codex-web-search-mcp-<platform>` 子包 → 发布元包
+   `codex-web-search-mcp` → 在 GitHub Release 附上各平台二进制。
+
+> 脚本 `scripts/set-version.js <版本>` 会把版本号同步到 `Cargo.toml` 与所有 npm 包。
+> 若你的 npm 账号不是 `dhicoc`，请先把子包 scope（`@dhicoc/...`）与元包 `optionalDependencies` 改成你的 scope，否则 `npm publish` 会因无权限失败。
 
 ## 后续可扩展
 

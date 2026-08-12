@@ -1,19 +1,13 @@
 {
   "name": "codex-web-search-mcp",
   "version": "2.0.0",
-  "description": "Model-independent web search & deep research MCP server (Rust rewrite). Backends: OpenAI Codex (default, free with ChatGPT login) and optional Grok/xAI. New tools: web_fetch, get_sources (pagination/budget), doctor, web_map. Runs as a standalone binary — no Node required.",
-  "bin": {
-    "codex-web-search-mcp": "target/release/codex-web-search-mcp"
-  },
+  "private": true,
+  "description": "Model-independent web search & deep research MCP server (Rust rewrite), powered by OpenAI Codex / Grok search endpoints.",
   "keywords": [
     "mcp",
-    "claude-code",
     "web-search",
     "codex",
     "grok",
-    "openai",
-    "deep-research",
-    "model-independent",
     "rust"
   ],
   "license": "MIT",
@@ -21,21 +15,9 @@
     "type": "git",
     "url": "https://github.com/dhicoc/codex-web-search-mcp.git"
   },
-  "homepage": "https://github.com/dhicoc/codex-web-search-mcp#readme",
-  "bugs": {
-    "url": "https://github.com/dhicoc/codex-web-search-mcp/issues"
-  },
   "scripts": {
-    "build": "cargo build --release",
-    "start": "cargo run --release"
-  },
-  "publishConfig": {
-    "registry": "https://registry.npmjs.org/"
-  },
-  "files": [
-    "target/release/codex-web-search-mcp",
-    "target/release/codex-web-search-mcp.exe",
-    "README.md",
-    "LICENSE"
-  ]
+    "build": "bash scripts/build.sh --release",
+    "build:debug": "bash scripts/build.sh",
+    "set-version": "node scripts/set-version.js"
+  }
 }
