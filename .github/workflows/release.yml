@@ -7,12 +7,15 @@ name: release
 #
 # Trigger: push a tag `vX.Y.Z`, or run manually from Actions with a version.
 #
-# Required repo secret:
-#   NPM_TOKEN  — an npm automation/publish token (https://www.npmjs.com/settings/<user>/tokens)
+# Optional repo secret (only needed for npm publishing):
+#   NPM_TOKEN  — an npm automation/publish token. If it is NOT set, the npm
+#                publish steps are skipped and ONLY the GitHub Release binaries
+#                are produced. No npm account required for the Release path.
 #
 # NOTE: the platform sub-packages are scoped under @dhicoc. If your npm account
 # is not `dhicoc`, rename the scope in npm/codex-web-search-mcp/package.json
-# (optionalDependencies) and in each npm/platforms/*/package.json (name).
+# (optionalDependencies) and in each npm/platforms/*/package.json (name) BEFORE
+# publishing to npm. This is NOT required for the GitHub Release binaries.
 
 on:
   push:
@@ -114,6 +117,7 @@ jobs:
           path: npm/platforms/${{ matrix.platform }}/bin/*
 
       - name: Publish platform package
+        if: ${{ secrets.NPM_TOKEN != '' }}
         shell: bash
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
@@ -125,6 +129,7 @@ jobs:
   publish-root:
     name: publish meta package
     needs: build
+    if: ${{ secrets.NPM_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -166,11 +171,24 @@ jobs:
         id: ver
         shell: bash
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Prepare platform-named release assets
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          for d in artifacts/bin-*; do
+            platform="${d#artifacts/bin-}"
+            if [ "$platform" = "win32-x64" ] || [ "$platform" = "win32-arm64" ]; then
+              cp "$d/codex-web-search-mcp.exe" "release-assets/codex-web-search-mcp-$platform.exe"
+            else
+              cp "$d/codex-web-search-mcp" "release-assets/codex-web-search-mcp-$platform"
+            fi
+          done
+          ls -la release-assets
       - name: Create GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: v${{ steps.ver.outputs.version }}
-          files: artifacts/**/codex-web-search-mcp*
+          files: release-assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
