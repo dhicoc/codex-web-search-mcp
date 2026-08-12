@@ -50,6 +50,11 @@ Claude Code（任意模型）
 
 > 没有 ChatGPT/Codex 账号、未登录、或会话过期（`401/403`）时，工具会返回明确的中文报错，而不是崩溃——按下面步骤补上凭证即可。
 
+> **成本与额度提醒**：本工具**不按 GPT 生成 token 计费**——它调用的是 Codex 的 `search` 端点（`/backend-api/codex/alpha/search`），而非 `chat/completions` 文本生成。但每次搜索都会**占用你 ChatGPT/Codex 账号的搜索额度与速率配额**（服务端按账号限流，超限返回 `429`）。要点：
+> - 需要**有效的 ChatGPT/Codex 登录态**；免费账号通常可用但频率/总量受限，高频或重度使用建议 Pro/Plus 账号。
+> - 它**不是「零 OpenAI 资源」**：与纯本地的 Playwright 类浏览器工具（完全不碰 OpenAI）不同，本工具依赖 OpenAI 搜索后端，每次调用都会消耗对应账号额度。
+> - 触发 `401/403`（凭证过期/权限不足）或 `429`（速率超限）时，按下方步骤重登录或稍后重试即可。
+
 ### 获取 Codex 凭证（必做）
 
 > **不必手动编写 `auth.json`**：它是 `codex login` 的 OAuth 产物（里面是颁发的 token），手搓无效。让 `codex login` 自动生成，或改用环境变量方式。
