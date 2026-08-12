@@ -2,7 +2,7 @@
 
 一个**模型无关**的 MCP (Model Context Protocol) server，把 OpenAI Codex 的独立搜索端点
 （`chatgpt.com/backend-api/codex/alpha/search`）封装成 Claude Code / 任意 MCP 客户端可用的联网搜索工具。
-**v2.0.0 起用 Rust 全量重写**为独立二进制（不再依赖 Node / npx）：
+**已用 Rust 全量重写**为独立二进制（当前 v2.1.0，不再依赖 Node / npx）：
 
 - 后端 **OpenAI Codex**（免费，只要 `codex login` 登录态）；
 - 3 个工具：`codex_web_search`、`codex_web_research`、`web_fetch`；
@@ -231,7 +231,7 @@ Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 
 
 ## 与原项目的差异
 
-| 维度 | pi-gpt-search（原，TS） | 旧版本项目（Node） | **v2.0.0（Rust 重写）** |
+| 维度 | pi-gpt-search（原，TS） | 旧版本项目（Node） | **本项目 v2.1.0（Rust 重写）** |
 |------|------------------------|-------------------|------------------------|
 | 语言 | TypeScript | 单文件 Node 脚本 | **Rust** |
 | 运行依赖 | Node + TS | Node | **无（独立二进制）** |
