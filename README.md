@@ -87,10 +87,20 @@ export CODEX_ACCOUNT_ID="你的account_id"     # 可选
 
 ## 安装（开箱即用，推荐）
 
-本项目是**独立原生二进制**，无需安装 Rust、无需 Node 即可使用。两种拿到二进制的方式：
+本项目是**独立原生二进制**，无需安装 Rust、无需 Node 即可使用。三种拿到二进制的方式：
 
-- **方式 A（推荐）：去 [Releases](https://github.com/dhicoc/codex-web-search-mcp/releases) 下载预编译文件**
-  —— 下载即用，零依赖。各平台文件名见下「配置 MCP · 方式 A」。
+- **方式 0（最省事，推荐）：一行命令自动安装**
+  - macOS / Linux：
+    ```bash
+    curl -fsSL https://raw.githubusercontent.com/dhicoc/codex-web-search-mcp/main/scripts/install.sh | bash
+    ```
+  - Windows（PowerShell）：
+    ```powershell
+    irm https://raw.githubusercontent.com/dhicoc/codex-web-search-mcp/main/scripts/install.ps1 | iex
+    ```
+  脚本会自动识别平台、下载预编译二进制、**校验 SHA-256**、安装并给出 MCP 配置片段；加 `--write-config` 可顺手生成 `.mcp.json`。
+- **方式 A：去 [Releases](https://github.com/dhicoc/codex-web-search-mcp/releases) 手动下载预编译文件**
+  —— 下载即用，零依赖。每个 Release 附带 `checksums.txt`（SHA-256 清单）供校验。各平台文件名见下「配置 MCP · 方式 A」。
 - **方式 B：从源码编译**（见下「编译（Build）」），产物直接运行。
 
 ## 编译（Build）
@@ -231,8 +241,9 @@ Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 
 ## 发布（维护者）
 
 二进制由 GitHub Actions 自动构建（`.github/workflows/release.yml`）：打 tag 即跨平台编译，
-并在 GitHub Release 附上 5 个平台的原生二进制（`codex-web-search-mcp-<platform>`）。
-用户走「方式 A」下载即用，**无需任何 npm 账号**。
+并在 GitHub Release 附上 5 个平台的原生二进制（`codex-web-search-mcp-<platform>`）外加
+`checksums.txt`（SHA-256 清单，供安装脚本/用户校验完整性）。用户走「方式 A/方式 0」下载即用，
+**无需任何 npm 账号**。演进方向见 [ROADMAP.md](./ROADMAP.md)。
 
 ```bash
 git tag v2.0.1 && git push origin v2.0.1

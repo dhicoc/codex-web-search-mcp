@@ -4,7 +4,7 @@
 // Tools: codex_web_search, codex_web_research, web_fetch.
 
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
@@ -16,6 +16,7 @@ const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/alpha/search
 const DEFAULT_MODEL: &str = "gpt-4o";
 const UA: &str = "codex-cli/0.147.0-alpha.6.5";
 const REQ_TIMEOUT: u64 = 20;
+const FETCH_TIMEOUT: u64 = 30;
 
 // ---------------------------------------------------------------------------
 // Global state
@@ -294,16 +295,87 @@ fn build_research_commands(args: &Value) -> Value {
 // ---------------------------------------------------------------------------
 // web_fetch (fetch a URL and return clean plain text)
 // ---------------------------------------------------------------------------
+// Dedicated agent: longer timeout + explicit redirect following (up to 10 hops).
+// ureq's default agent already follows redirects, but we make it explicit so a
+// moved page (301/302) resolves to the final content instead of an empty body.
+fn fetch_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(FETCH_TIMEOUT))
+            .redirects(10)
+            .build()
+    })
+}
+
+// Detect the text encoding so GBK / GB2312 / EUC-JP etc. pages decode correctly
+// instead of showing mojibake. Priority: Content-Type charset → <meta> tag → UTF-8.
+fn meta_charset_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r#"(?is)(?:charset\s*=\s*["']?\s*([\w-]+)|content\s*=\s*["'][^>]*charset=([\w-]+))"#)
+            .unwrap()
+    })
+}
+fn detect_encoding(content_type: &str, body: &[u8]) -> &'static encoding_rs::Encoding {
+    // 0x27 = single quote; build without a backslash escape to keep the lexer happy.
+    let squote = char::from(0x27u8);
+    if let Some(pos) = content_type.to_ascii_lowercase().find("charset=") {
+        let mut label = content_type[pos + 8..]
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim();
+        if (label.starts_with('"') && label.ends_with('"'))
+            || (label.starts_with(squote) && label.ends_with(squote))
+        {
+            label = &label[1..label.len() - 1];
+        }
+        if !label.is_empty() {
+            if let Some(enc) = encoding_rs::Encoding::for_label(label.as_bytes()) {
+                return enc;
+            }
+        }
+    }
+    let head = String::from_utf8_lossy(&body[..body.len().min(4096)]);
+    if let Some(cap) = meta_charset_re().captures(&head) {
+        let label = cap
+            .get(1)
+            .or_else(|| cap.get(2))
+            .map(|m| m.as_str())
+            .unwrap_or("");
+        if !label.is_empty() {
+            if let Some(enc) = encoding_rs::Encoding::for_label(label.as_bytes()) {
+                return enc;
+            }
+        }
+    }
+    encoding_rs::UTF_8
+}
+
 fn web_fetch(url: &str) -> Result<String, String> {
-    let resp = ureq::get(url)
+    let resp = fetch_agent()
+        .get(url)
         .set("User-Agent", UA)
-        .timeout(Duration::from_secs(REQ_TIMEOUT))
         .call()
         .map_err(|e| format!("抓取失败: {}", e))?;
-    let body = resp
-        .into_string()
+    let content_type = resp.header("Content-Type").unwrap_or("").to_string();
+    let mut body_bytes = Vec::new();
+    resp.into_reader()
+        .read_to_end(&mut body_bytes)
         .map_err(|e| format!("读取正文失败: {}", e))?;
-    Ok(strip_html(&body))
+    // Robust decode: if the bytes are already valid UTF-8, use UTF-8 directly. This
+    // covers pages that declare charset=gbk/gb2312 in the header/meta but actually
+    // send a UTF-8 body (mislabeled). Otherwise trust the declared/charset detection
+    // so genuine GBK/GB2312 pages decode correctly instead of showing mojibake.
+    let html = if std::str::from_utf8(&body_bytes).is_ok() {
+        String::from_utf8_lossy(&body_bytes).into_owned()
+    } else {
+        let enc = detect_encoding(&content_type, &body_bytes);
+        let (text, _actual_enc, _had_errors) = enc.decode(&body_bytes);
+        text.into_owned()
+    };
+    Ok(strip_html(&html))
 }
 fn strip_html(html: &str) -> String {
     let re_script = Regex::new(r"(?is)<script.*?</script>").unwrap();
@@ -449,7 +521,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "web_fetch",
-            "description": "抓取任意 URL 并返回干净的纯文本（剥离脚本/样式/标签）。补齐「搜到链接却读不到正文、JS 渲染页读不到」的短板。",
+            "description": "抓取任意 URL 并返回干净的纯文本（剥离脚本/样式/标签，自动探测 charset 解码 GBK/GB2312 等中文编码，跟随 301/302 重定向）。补齐「搜到链接却读不到正文、JS 渲染页读不到」的短板。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -519,7 +591,7 @@ fn handle(msg: &Value) -> Option<Value> {
             "result": {
                 "protocolVersion": msg.get("params").and_then(|p| p.get("protocolVersion")).and_then(|x| x.as_str()).unwrap_or("2024-11-05"),
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "codex-web-search", "version": "2.0.0" }
+                "serverInfo": { "name": "codex-web-search", "version": "2.1.0" }
             }
         })),
         "notifications/initialized" | "initialized" => None,
