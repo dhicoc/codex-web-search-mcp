@@ -23,6 +23,3 @@ Thumbs.db
 
 # Rust build artifacts (the compiled binary is large; build locally)
 target/
-
-# Per-platform npm binaries — built & published by CI (release.yml), not committed
-npm/platforms/*/bin/

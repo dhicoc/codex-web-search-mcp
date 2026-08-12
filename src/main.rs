@@ -1,8 +1,7 @@
 // codex-web-search-mcp — Rust rewrite
 // Model-independent web search & deep research MCP server over stdio (JSON-RPC 2.0).
-// Backends: OpenAI Codex (default, free with ChatGPT login) and optional Grok/xAI.
-// New tools vs the old Node version: web_fetch, get_sources (pagination/budget),
-// doctor (self-check), web_map (Tavily Map).
+// Backend: OpenAI Codex (free with ChatGPT login).
+// Tools: codex_web_search, codex_web_research, web_fetch.
 
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -11,7 +10,6 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use regex::Regex;
-use serde::Deserialize;
 use serde_json::{json, Value};
 
 const CODEX_ENDPOINT: &str = "https://chatgpt.com/backend-api/codex/alpha/search";
@@ -23,14 +21,9 @@ const REQ_TIMEOUT: u64 = 20;
 // Global state
 // ---------------------------------------------------------------------------
 static SESSION_ID: OnceLock<Mutex<String>> = OnceLock::new();
-static SOURCE_CACHE: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
-static FILE_CONFIG: OnceLock<FileConfig> = OnceLock::new();
 
 fn session_id() -> &'static Mutex<String> {
     SESSION_ID.get_or_init(|| Mutex::new(format!("ccs_{}", nanoid())))
-}
-fn source_cache() -> &'static Mutex<HashMap<String, Value>> {
-    SOURCE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 fn nanoid() -> String {
     let n = std::time::SystemTime::now()
@@ -42,8 +35,9 @@ fn nanoid() -> String {
 
 // ---------------------------------------------------------------------------
 // PUA (private-use-area) citation marker cleanup
-// Codex returns <U+E200>cite<U+E202><id>†<label>†<domain><U+E201> markers. We
-// rewrite them into readable [cN: label → domain] so the model can follow links.
+// Codex returns <U+E200>cite<U+E202><id><U+E201> markers (id = ref_id). The
+// readable title/domain live in the `results` array; we rewrite markers into
+// `[ref_id: Title → domain]` so the model can follow links via open/click.
 // ---------------------------------------------------------------------------
 fn cite_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -64,30 +58,17 @@ fn linenav_re() -> &'static Regex {
 fn clean_output(text: &str, refs: &HashMap<String, (String, String)>) -> String {
     let s = cite_re().replace_all(text, |caps: &regex::Captures| {
         let inner = &caps[1];
-        let parts: Vec<&str> = inner.split('\u{2020}').collect();
-        let cid = parts.first().map(|s| s.trim()).unwrap_or("").to_string();
+        let cid = inner.trim().to_string();
         if cid.is_empty() {
             return String::new();
         }
-        // 新格式：PUA 标记里只有 ref_id，label/domain 在 results 里；优先从 map 取。
         if let Some((title, domain)) = refs.get(&cid) {
             if domain.is_empty() {
                 return format!(" [{}: {}]", cid, title);
             }
             return format!(" [{}: {} → {}]", cid, title, domain);
         }
-        // 旧格式兜底：标记内自带 †label†domain。
-        let label = parts.get(1).map(|s| s.trim()).unwrap_or("");
-        let domain = parts.get(2).map(|s| s.trim()).unwrap_or("");
-        if domain.is_empty() {
-            if label.is_empty() {
-                format!(" [{}]", cid)
-            } else {
-                format!(" [{}: {}]", cid, label)
-            }
-        } else {
-            format!(" [{}: {} → {}]", cid, label, domain)
-        }
+        format!(" [{}]", cid)
     });
     let s = pua_re().replace_all(&s, "");
     let s = wordlim_re().replace_all(&s, "");
@@ -97,63 +78,14 @@ fn clean_output(text: &str, refs: &HashMap<String, (String, String)>) -> String 
 }
 
 // ---------------------------------------------------------------------------
-// Config
+// Codex auth
 // ---------------------------------------------------------------------------
-#[derive(Debug, Clone, Default, Deserialize)]
-struct FileConfig {
-    grok_api_key: Option<String>,
-    grok_base_url: Option<String>,
-    grok_model: Option<String>,
-    tavily_api_key: Option<String>,
-    firecrawl_api_key: Option<String>,
-    exa_api_key: Option<String>,
-    response_max_chars: Option<usize>,
-    max_inline_sources: Option<usize>,
-}
-
-fn load_file_config() -> FileConfig {
-    let path = std::env::var("CODEX_SEARCH_CONFIG")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| {
-            let home = std::env::var("HOME")
-                .or_else(|_| std::env::var("USERPROFILE"))
-                .ok()?;
-            Some(
-                PathBuf::from(home)
-                    .join(".config")
-                    .join("codex-web-search-mcp")
-                    .join("config.toml"),
-            )
-        });
-    if let Some(p) = path {
-        if let Ok(s) = std::fs::read_to_string(&p) {
-            if let Ok(cfg) = toml::from_str::<FileConfig>(&s) {
-                return cfg;
-            }
-        }
-    }
-    FileConfig::default()
-}
-fn file_config() -> &'static FileConfig {
-    FILE_CONFIG.get_or_init(load_file_config)
-}
-fn cfg(env_key: &str, file_val: &Option<String>) -> Option<String> {
-    std::env::var(env_key)
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| file_val.clone())
-}
 fn home_dir() -> Option<PathBuf> {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .ok()
         .map(PathBuf::from)
 }
-
-// ---------------------------------------------------------------------------
-// Codex auth
-// ---------------------------------------------------------------------------
 fn load_codex_auth() -> Option<(String, Option<String>)> {
     if let Some(t) = std::env::var("CODEX_ACCESS_TOKEN")
         .ok()
@@ -359,147 +291,8 @@ fn build_research_commands(args: &Value) -> Value {
     commands
 }
 
-fn format_text(norm: &Value, expose_refs: bool) -> String {
-    let cfg = file_config();
-    let max_sources = cfg.max_inline_sources.unwrap_or(usize::MAX);
-    let mut lines = Vec::new();
-    if let Some(o) = norm.get("output").and_then(|x| x.as_str()) {
-        if !o.is_empty() {
-            lines.push(o.to_string());
-        }
-    }
-    if let Some(arr) = norm.get("results").and_then(|x| x.as_array()) {
-        if !arr.is_empty() {
-            lines.push(String::new());
-            lines.push("Sources:".into());
-            for (i, r) in arr.iter().take(max_sources).enumerate() {
-                let title = r
-                    .get("title")
-                    .and_then(|x| x.as_str())
-                    .or_else(|| r.get("url").and_then(|x| x.as_str()))
-                    .unwrap_or("(untitled)");
-                if expose_refs {
-                    if let Some(rid) = r.get("ref_id").and_then(|x| x.as_str()) {
-                        lines.push(format!("[{}] (ref: {}) {}", i + 1, rid, title));
-                    } else {
-                        lines.push(format!("[{}] {}", i + 1, title));
-                    }
-                } else {
-                    lines.push(format!("[{}] {}", i + 1, title));
-                }
-                if let Some(u) = r.get("url").and_then(|x| x.as_str()) {
-                    lines.push(format!("    {}", u));
-                } else if let Some(d) = r.get("domain").and_then(|x| x.as_str()) {
-                    lines.push(format!("    {}", d));
-                }
-                if let Some(s) = r.get("snippet").and_then(|x| x.as_str()) {
-                    lines.push(format!("    {}", s));
-                }
-            }
-        }
-    }
-    if lines.is_empty() {
-        return "No results returned.".into();
-    }
-    let mut out = lines.join("\n");
-    if expose_refs && Regex::new(r"\[(?:c\d+|\w*search\w*):")
-        .map(|re| re.is_match(&out))
-        .unwrap_or(false)
-    {
-        out.push_str(
-            "\n\n（文档内容里 [turn0searchN: ...] / [cN: ...] 标记即是可点击的链接元素，其 ref_id（如 turn0searchN）可直接用于 open/click 跟随该链接继续深挖）",
-        );
-    }
-    // 预算控制：超过 response_max_chars 则截断，避免一次性灌入过多正文。
-    if let Some(budget) = cfg.response_max_chars {
-        if out.chars().count() > budget {
-            let cut = out.char_indices().nth(budget).map(|(i, _)| i).unwrap_or(out.len());
-            out.truncate(cut);
-            out.push_str(&format!("\n\n…(输出已按 response_max_chars={} 截断)", budget));
-        }
-    }
-    out
-}
-
-fn is_backend_error(norm: &Value) -> bool {
-    let o = norm.get("output").and_then(|x| x.as_str()).unwrap_or("");
-    o.contains("Internal Error") || o.contains("Unable to resolve") || o.contains("due to invalid arguments")
-}
-
 // ---------------------------------------------------------------------------
-// Grok / xAI backend (optional, activated by key)
-// ---------------------------------------------------------------------------
-fn grok_keys() -> Option<String> {
-    cfg("GROK_SEARCH_API_KEY", &file_config().grok_api_key)
-        .or_else(|| cfg("XAI_API_KEY", &None))
-}
-fn backend_is_grok() -> bool {
-    std::env::var("CODEX_SEARCH_BACKEND").ok().as_deref() == Some("grok")
-        && grok_keys().is_some()
-}
-fn call_grok_web_search(query: &str, response_length: Option<&str>) -> Result<Value, String> {
-    let key = grok_keys()
-        .ok_or_else(|| "未配置 Grok/xAI API Key（GROK_SEARCH_API_KEY 或 XAI_API_KEY）。".to_string())?;
-    let base = cfg("GROK_SEARCH_URL", &file_config().grok_base_url)
-        .unwrap_or_else(|| "https://api.x.ai".into());
-    let model = cfg("GROK_SEARCH_MODEL", &file_config().grok_model)
-        .unwrap_or_else(|| "grok-4.1-fast".into());
-    let url = format!("{}/v1/responses", base.trim_end_matches('/'));
-    let mut payload = json!({
-        "model": model,
-        "input": query,
-        "tools": [{ "type": "web_search" }],
-    });
-    if let Some(rl) = response_length {
-        payload["response_format"] = json!(if rl == "short" { "concise" } else { "detailed" });
-    }
-    let resp = ureq::post(&url)
-        .set("Authorization", &format!("Bearer {}", key))
-        .set("Content-Type", "application/json")
-        .timeout(Duration::from_secs(REQ_TIMEOUT))
-        .send_json(&payload);
-    match resp {
-        Ok(r) => {
-            let body: Value = r.into_json().map_err(|e| e.to_string())?;
-            Ok(grok_normalize(&body))
-        }
-        Err(e) => Err(format!("Grok 请求失败: {}", e)),
-    }
-}
-fn grok_normalize(body: &Value) -> Value {
-    let mut text = String::new();
-    let mut results = Vec::new();
-    if let Some(out) = body.get("output").and_then(|x| x.as_array()) {
-        for item in out {
-            if item.get("type").and_then(|t| t.as_str()) == Some("message") {
-                if let Some(c) = item.get("content").and_then(|c| c.as_array()) {
-                    for cc in c {
-                        if let Some(t) = cc.get("text").and_then(|x| x.as_str()) {
-                            text.push_str(t);
-                            text.push('\n');
-                        }
-                    }
-                }
-            }
-            if let Some(c) = item.get("content").and_then(|c| c.as_array()) {
-                for cc in c {
-                    if let Some(anns) = cc.get("annotations").and_then(|a| a.as_array()) {
-                        for ann in anns {
-                            if let Some(u) = ann.get("url").and_then(|x| x.as_str()) {
-                                let title = ann.get("title").and_then(|x| x.as_str()).unwrap_or(u);
-                                results.push(json!({ "url": u, "title": title }));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    json!({ "output": text.trim().to_string(), "results": results })
-}
-
-// ---------------------------------------------------------------------------
-// web_fetch / web_map (provider chain)
+// web_fetch (fetch a URL and return clean plain text)
 // ---------------------------------------------------------------------------
 fn web_fetch(url: &str) -> Result<String, String> {
     let resp = ureq::get(url)
@@ -533,133 +326,66 @@ fn strip_html(html: &str) -> String {
         .to_string();
     s
 }
-fn web_map(domain: &str) -> Result<Vec<String>, String> {
-    let key = cfg("TAVILY_API_KEY", &file_config().tavily_api_key)
-        .ok_or_else(|| "未配置 TAVILY_API_KEY（web_map 需要）。".to_string())?;
-    let resp = ureq::post("https://api.tavily.com/map")
-        .set("Authorization", &format!("Bearer {}", key))
-        .set("Content-Type", "application/json")
-        .timeout(Duration::from_secs(REQ_TIMEOUT))
-        .send_json(&json!({ "url": domain }));
-    match resp {
-        Ok(r) => {
-            let body: Value = r.into_json().map_err(|e| e.to_string())?;
-            let urls = body
-                .get("urls")
-                .and_then(|x| x.as_array())
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|u| u.as_str().map(|s| s.to_string()))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Ok(urls)
-        }
-        Err(e) => Err(format!("Tavily Map 失败: {}", e)),
-    }
-}
 
 // ---------------------------------------------------------------------------
-// get_sources (pagination over cached session results)
+// Format output
 // ---------------------------------------------------------------------------
-fn get_sources(args: &Value) -> String {
-    let sid = args
-        .get("session_id")
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| session_id().lock().unwrap().clone());
-    let offset = args
-        .get("offset")
-        .and_then(|x| x.as_i64())
-        .unwrap_or(0)
-        .max(0) as usize;
-    let limit = args
-        .get("limit")
-        .and_then(|x| x.as_i64())
-        .unwrap_or(10)
-        .max(1) as usize;
-    let cache = source_cache().lock().unwrap();
-    match cache.get(&sid) {
-        Some(n) => {
-            if let Some(arr) = n.get("results").and_then(|x| x.as_array()) {
-                let total = arr.len();
-                let end = (offset + limit).min(total);
-                let mut lines = vec![format!(
-                    "Session {}：共 {} 个来源，显示第 {}-{} 条：",
-                    sid,
-                    total,
-                    offset + 1,
-                    end
-                )];
-                for (i, r) in arr.iter().enumerate().skip(offset).take(limit) {
-                    let title = r
-                        .get("title")
-                        .and_then(|x| x.as_str())
-                        .or_else(|| r.get("url").and_then(|x| x.as_str()))
-                        .unwrap_or("(untitled)");
-                    lines.push(format!("[{}] {}", i + 1, title));
-                    if let Some(u) = r.get("url").and_then(|x| x.as_str()) {
-                        lines.push(format!("    {}", u));
-                    }
-                }
-                lines.join("\n")
-            } else {
-                "该 session 无缓存来源。".into()
-            }
-        }
-        None => "未找到该 session 的缓存来源，请先执行 codex_web_search。".into(),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// doctor (connectivity + redacted config)
-// ---------------------------------------------------------------------------
-fn mask_key(v: &Option<String>) -> String {
-    match v {
-        Some(s) if s.len() >= 8 => format!("{}…{}", &s[..4], &s[s.len() - 4..]),
-        Some(s) => format!("{}…(短)", &s[..s.len().min(4)]),
-        None => "未设置".into(),
-    }
-}
-fn doctor() -> String {
+fn format_text(norm: &Value, expose_refs: bool) -> String {
     let mut lines = Vec::new();
-    lines.push("=== codex-web-search-mcp doctor ===".into());
-    lines.push(format!(
-        "Codex 凭证: {}",
-        if load_codex_auth().is_some() {
-            "已配置 ✓"
-        } else {
-            "缺失 ✗"
+    if let Some(o) = norm.get("output").and_then(|x| x.as_str()) {
+        if !o.is_empty() {
+            lines.push(o.to_string());
         }
-    ));
-    lines.push(format!("当前后端: {}", if backend_is_grok() { "grok" } else { "codex" }));
-    lines.push(format!(
-        "GROK/XAI key: {}",
-        mask_key(&grok_keys())
-    ));
-    lines.push(format!(
-        "TAVILY key: {}",
-        mask_key(&cfg("TAVILY_API_KEY", &file_config().tavily_api_key))
-    ));
-    lines.push(format!(
-        "FIRECRAWL key: {}",
-        mask_key(&cfg("FIRECRAWL_API_KEY", &file_config().firecrawl_api_key))
-    ));
-    lines.push(format!(
-        "EXA key: {}",
-        mask_key(&cfg("EXA_API_KEY", &file_config().exa_api_key))
-    ));
-    match load_codex_auth() {
-        Some(_) => {
-            let probe = call_codex(&json!({ "search_query": [{ "q": "connectivity probe" }] }));
-            match probe {
-                Ok(_) => lines.push("Codex 端点连通性: 正常 ✓".into()),
-                Err(e) => lines.push(format!("Codex 端点连通性: 失败 ✗ ({})", e)),
+    }
+    if let Some(arr) = norm.get("results").and_then(|x| x.as_array()) {
+        if !arr.is_empty() {
+            lines.push(String::new());
+            lines.push("Sources:".into());
+            for (i, r) in arr.iter().enumerate() {
+                let title = r
+                    .get("title")
+                    .and_then(|x| x.as_str())
+                    .or_else(|| r.get("url").and_then(|x| x.as_str()))
+                    .unwrap_or("(untitled)");
+                if expose_refs {
+                    if let Some(rid) = r.get("ref_id").and_then(|x| x.as_str()) {
+                        lines.push(format!("[{}] (ref: {}) {}", i + 1, rid, title));
+                    } else {
+                        lines.push(format!("[{}] {}", i + 1, title));
+                    }
+                } else {
+                    lines.push(format!("[{}] {}", i + 1, title));
+                }
+                if let Some(u) = r.get("url").and_then(|x| x.as_str()) {
+                    lines.push(format!("    {}", u));
+                } else if let Some(d) = r.get("domain").and_then(|x| x.as_str()) {
+                    lines.push(format!("    {}", d));
+                }
+                if let Some(s) = r.get("snippet").and_then(|x| x.as_str()) {
+                    lines.push(format!("    {}", s));
+                }
             }
         }
-        None => lines.push("Codex 端点连通性: 跳过（无凭证）".into()),
     }
-    lines.join("\n")
+    if lines.is_empty() {
+        return "No results returned.".into();
+    }
+    let mut out = lines.join("\n");
+    if expose_refs
+        && Regex::new(r"\[(?:c\d+|\w*search\w*):")
+            .map(|re| re.is_match(&out))
+            .unwrap_or(false)
+    {
+        out.push_str(
+            "\n\n（文档内容里 [turn0searchN: ...] / [cN: ...] 标记即是可点击的链接元素，其 ref_id（如 turn0searchN）可直接用于 open/click 跟随该链接继续深挖）",
+        );
+    }
+    out
+}
+
+fn is_backend_error(norm: &Value) -> bool {
+    let o = norm.get("output").and_then(|x| x.as_str()).unwrap_or("");
+    o.contains("Internal Error") || o.contains("Unable to resolve") || o.contains("due to invalid arguments")
 }
 
 // ---------------------------------------------------------------------------
@@ -669,7 +395,7 @@ fn tools_list() -> Value {
     json!([
         {
             "name": "codex_web_search",
-            "description": "通过 OpenAI Codex 独立搜索端点执行实时联网搜索（默认后端），或可选 Grok/xAI（设 GROK_SEARCH_BACKEND=grok + key）。返回答案文本与带标题/URL/摘要的来源列表。与底层模型无关，适合非 Anthropic 模型下的联网搜索。需要 Codex 凭证或 Grok key。",
+            "description": "通过 OpenAI Codex 独立搜索端点执行实时联网搜索（需要 Codex 凭证）。返回答案文本与带标题/URL/摘要的来源列表。与底层模型无关，适合非 Anthropic 模型下的联网搜索。",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -731,34 +457,6 @@ fn tools_list() -> Value {
                 },
                 "required": ["url"]
             }
-        },
-        {
-            "name": "get_sources",
-            "description": "按 session_id 分页重取上一次搜索的来源列表（避免重复搜索）。offset/limit 控制分页。",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "session_id": { "type": "string", "description": "会话 id（可选，默认当前会话）" },
-                    "offset": { "type": "number", "description": "起始序号（从 0）" },
-                    "limit": { "type": "number", "description": "返回条数（默认 10）" }
-                }
-            }
-        },
-        {
-            "name": "doctor",
-            "description": "自检：连通性探测 + 脱敏展示当前配置（后端、各 API key 是否设置）。用于排错。",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "web_map",
-            "description": "经 Tavily Map 发现某域名下的 URL 列表。需要 TAVILY_API_KEY。",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "url": { "type": "string", "description": "要映射的域名或起始 URL" }
-                },
-                "required": ["url"]
-            }
         }
     ])
 }
@@ -773,23 +471,10 @@ fn handle_tool_call(name: &str, args: &Value) -> (String, bool) {
             if query.is_empty() {
                 return ("参数 query 不能为空。".into(), true);
             }
-            let rl = args.get("response_length").and_then(|x| x.as_str());
-            let norm = if backend_is_grok() {
-                match call_grok_web_search(query, rl) {
-                    Ok(n) => n,
-                    Err(e) => return (e, true),
-                }
-            } else {
-                match call_codex(&build_search_commands(args)) {
-                    Ok(n) => n,
-                    Err(e) => return (e, true),
-                }
-            };
-            source_cache()
-                .lock()
-                .unwrap()
-                .insert(session_id().lock().unwrap().clone(), norm.clone());
-            (format_text(&norm, true), is_backend_error(&norm))
+            match call_codex(&build_search_commands(args)) {
+                Ok(norm) => (format_text(&norm, true), is_backend_error(&norm)),
+                Err(e) => (e, true),
+            }
         }
         "codex_web_research" => {
             if let Some(sid) = args.get("session_id").and_then(|x| x.as_str()) {
@@ -806,13 +491,7 @@ fn handle_tool_call(name: &str, args: &Value) -> (String, bool) {
                 return ("至少需要提供一项操作：search_query / open / find / click。".into(), true);
             }
             match call_codex(&commands) {
-                Ok(norm) => {
-                    source_cache()
-                        .lock()
-                        .unwrap()
-                        .insert(session_id().lock().unwrap().clone(), norm.clone());
-                    (format_text(&norm, true), is_backend_error(&norm))
-                }
+                Ok(norm) => (format_text(&norm, true), is_backend_error(&norm)),
                 Err(e) => (e, true),
             }
         }
@@ -823,24 +502,6 @@ fn handle_tool_call(name: &str, args: &Value) -> (String, bool) {
             }
             match web_fetch(url) {
                 Ok(t) => (t, false),
-                Err(e) => (e, true),
-            }
-        }
-        "get_sources" => (get_sources(args), false),
-        "doctor" => (doctor(), false),
-        "web_map" => {
-            let url = args.get("url").and_then(|x| x.as_str()).unwrap_or("").trim();
-            if url.is_empty() {
-                return ("参数 url 不能为空。".into(), true);
-            }
-            match web_map(url) {
-                Ok(urls) => {
-                    if urls.is_empty() {
-                        ("未返回任何 URL。".into(), false)
-                    } else {
-                        (format!("发现 {} 个 URL：\n{}", urls.len(), urls.join("\n")), false)
-                    }
-                }
                 Err(e) => (e, true),
             }
         }

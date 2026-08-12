@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "codex-web-search": {
-      "command": "codex-web-search-mcp"
+      "command": "C:/path/to/codex-web-search-mcp-win32-x64.exe"
     }
   }
 }
@@ -11,23 +11,17 @@
 //
 // 两种方式启动这个 server：
 //
-// 方式 A（开箱即用，推荐）：npm 全局安装后直接用命令名
-//     先 `npm install -g codex-web-search-mcp`
-//     "command": "codex-web-search-mcp"
-//     （npm 会按当前平台拉取预编译好的原生二进制，无需 Rust / Node 运行时）
+// 方式 A（开箱即用，推荐）：从 GitHub Releases 下载对应平台的预编译二进制
+//   https://github.com/dhicoc/codex-web-search-mcp/releases
+//   Windows x64 → codex-web-search-mcp-win32-x64.exe
+//   把 "command" 换成你下载的文件路径即可。无需 Rust / Node。
 //
 // 方式 B（从源码编译）：指向编译产物
 //   Windows： "command": "D:/codex-web-search-mcp/target/release/codex-web-search-mcp.exe"
 //   macOS / Linux： "command": "/path/to/codex-web-search-mcp/target/release/codex-web-search-mcp"
 //
-// 可选环境变量（不填也能用，默认走 OpenAI Codex 后端）：
+// 可选环境变量（不填也能用）：
 //      CODEX_ACCESS_TOKEN / CODEX_ACCOUNT_ID   —— 覆盖 codex login 的凭证
-//      CODEX_SEARCH_BACKEND=grok                —— 切到 Grok/xAI 后端（需下面 key）
-//      GROK_SEARCH_API_KEY 或 XAI_API_KEY       —— Grok 后端凭据
-//      GROK_SEARCH_URL / GROK_SEARCH_MODEL      —— Grok 自定义端点/模型
-//      TAVILY_API_KEY                           —— web_map 工具所需
-//      CODEX_SEARCH_CONFIG                      —— 指向 config.toml 的绝对路径
-//      （默认读取 ~/.config/codex-web-search-mcp/config.toml）
 //
 // 凭证必做：先 `codex login`（生成 ~/.codex/auth.json），或设置 CODEX_ACCESS_TOKEN。
 // 没有凭证任何搜索工具都会报错。

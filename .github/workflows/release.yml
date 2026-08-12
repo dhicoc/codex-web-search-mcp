@@ -1,21 +1,10 @@
 name: release
 
-# Builds the Rust binary for every supported platform, publishes each as a
-# scoped npm platform package, then publishes the meta `codex-web-search-mcp`
-# package (which pulls in only the matching binary via optionalDependencies).
-# Finally attaches the binaries to a GitHub Release.
+# Builds the Rust binary for every supported platform and attaches them to a
+# GitHub Release. No npm account required — users download the matching binary
+# and point their MCP client at it.
 #
 # Trigger: push a tag `vX.Y.Z`, or run manually from Actions with a version.
-#
-# Optional repo secret (only needed for npm publishing):
-#   NPM_TOKEN  — an npm automation/publish token. If it is NOT set, the npm
-#                publish steps are skipped and ONLY the GitHub Release binaries
-#                are produced. No npm account required for the Release path.
-#
-# NOTE: the platform sub-packages are scoped under @dhicoc. If your npm account
-# is not `dhicoc`, rename the scope in npm/codex-web-search-mcp/package.json
-# (optionalDependencies) and in each npm/platforms/*/package.json (name) BEFORE
-# publishing to npm. This is NOT required for the GitHub Release binaries.
 
 on:
   push:
@@ -41,11 +30,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x64,        os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  targets: "x86_64-unknown-linux-gnu" }
-          - { platform: linux-arm64,      os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, targets: "aarch64-unknown-linux-gnu", use-cross: true }
-          - { platform: darwin-universal, os: macos-latest,   target: universal,                targets: "x86_64-apple-darwin,aarch64-apple-darwin" }
-          - { platform: win32-x64,        os: windows-latest, target: x86_64-pc-windows-msvc,   targets: "x86_64-pc-windows-msvc" }
-          - { platform: win32-arm64,      os: windows-latest, target: aarch64-pc-windows-msvc,  targets: "aarch64-pc-windows-msvc" }
+          - { platform: linux-x64,        os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,  targets: "x86_64-unknown-linux-gnu", artifact: "target/x86_64-unknown-linux-gnu/release/codex-web-search-mcp" }
+          - { platform: linux-arm64,      os: ubuntu-latest,  target: aarch64-unknown-linux-gnu, targets: "aarch64-unknown-linux-gnu", use-cross: true, artifact: "target/aarch64-unknown-linux-gnu/release/codex-web-search-mcp" }
+          - { platform: darwin-universal, os: macos-latest,   target: universal,                targets: "x86_64-apple-darwin,aarch64-apple-darwin", artifact: "target/universal/codex-web-search-mcp" }
+          - { platform: win32-x64,        os: windows-latest, target: x86_64-pc-windows-msvc,   targets: "x86_64-pc-windows-msvc", artifact: "target/x86_64-pc-windows-msvc/release/codex-web-search-mcp.exe" }
+          - { platform: win32-arm64,      os: windows-latest, target: aarch64-pc-windows-msvc,  targets: "aarch64-pc-windows-msvc", artifact: "target/aarch64-pc-windows-msvc/release/codex-web-search-mcp.exe" }
     steps:
       - uses: actions/checkout@v4
 
@@ -57,20 +46,6 @@ jobs:
       - name: Install cross (linux-arm64)
         if: matrix.use-cross
         run: cargo install cross --locked
-
-      - name: Resolve version
-        id: ver
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Bump versions
-        run: node scripts/set-version.js ${{ steps.ver.outputs.version }}
-        shell: bash
 
       - name: Build (native)
         if: ${{ !matrix.use-cross && matrix.target != 'universal' }}
@@ -92,70 +67,11 @@ jobs:
             target/x86_64-apple-darwin/release/codex-web-search-mcp \
             target/aarch64-apple-darwin/release/codex-web-search-mcp
 
-      - name: Stage binary into npm platform package
-        shell: bash
-        run: |
-          DIR="npm/platforms/${{ matrix.platform }}/bin"
-          mkdir -p "$DIR"
-          if [ "${{ matrix.platform }}" = "win32-x64" ] || [ "${{ matrix.platform }}" = "win32-arm64" ]; then
-            BIN="codex-web-search-mcp.exe"
-            SRC="target/${{ matrix.target }}/release/codex-web-search-mcp.exe"
-          elif [ "${{ matrix.platform }}" = "darwin-universal" ]; then
-            BIN="codex-web-search-mcp"
-            SRC="target/universal/codex-web-search-mcp"
-          else
-            BIN="codex-web-search-mcp"
-            SRC="target/${{ matrix.target }}/release/codex-web-search-mcp"
-          fi
-          cp "$SRC" "$DIR/$BIN"
-          ls -la "$DIR"
-
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: bin-${{ matrix.platform }}
-          path: npm/platforms/${{ matrix.platform }}/bin/*
-
-      - name: Publish platform package
-        if: ${{ secrets.NPM_TOKEN != '' }}
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          cd "npm/platforms/${{ matrix.platform }}"
-          npm config set //registry.npmjs.org/:_authToken="$NODE_AUTH_TOKEN"
-          npm publish --access public
-
-  publish-root:
-    name: publish meta package
-    needs: build
-    if: ${{ secrets.NPM_TOKEN != '' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: Resolve version
-        id: ver
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Bump versions
-        run: node scripts/set-version.js ${{ steps.ver.outputs.version }}
-        shell: bash
-      - name: Publish meta package
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          cd npm/codex-web-search-mcp
-          npm config set //registry.npmjs.org/:_authToken="$NODE_AUTH_TOKEN"
-          npm publish --access public
+          path: ${{ matrix.artifact }}
 
   github-release:
     name: github release

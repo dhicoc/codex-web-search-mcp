@@ -2,21 +2,20 @@
 
 一个**模型无关**的 MCP (Model Context Protocol) server，把 OpenAI Codex 的独立搜索端点
 （`chatgpt.com/backend-api/codex/alpha/search`）封装成 Claude Code / 任意 MCP 客户端可用的联网搜索工具。
-**v2.0.0 起用 Rust 全量重写**，并参考 [Episkey-G/GrokSearch-rs](https://github.com/Episkey-G/GrokSearch-rs) 做了能力升级：
+**v2.0.0 起用 Rust 全量重写**为独立二进制（不再依赖 Node / npx）：
 
-- 默认后端 **OpenAI Codex**（免费，只要 `codex login` 登录态），可选后端 **Grok/xAI**；
-- 6 个工具：`codex_web_search`、`codex_web_research`、`web_fetch`、`get_sources`（分页+预算）、`doctor`、`web_map`；
-- 独立二进制，**不再依赖 Node / npx**（编译一次，直接运行 exe）。
+- 后端 **OpenAI Codex**（免费，只要 `codex login` 登录态）；
+- 3 个工具：`codex_web_search`、`codex_web_research`、`web_fetch`；
+- 独立二进制，**无需 Rust 运行时即可运行**（下载预编译 exe 即用）。
 
-> 灵感与端点实现来自 [mateusdcc/pi-gpt-search](https://github.com/mateusdcc/pi-gpt-search)（MIT）；
-> v2 的能力模型（多后端、web_fetch、doctor、预算控制、web_map）参考 [Episkey-G/GrokSearch-rs](https://github.com/Episkey-G/GrokSearch-rs)。
+> 灵感与端点实现来自 [mateusdcc/pi-gpt-search](https://github.com/mateusdcc/pi-gpt-search)（MIT）。
 
 ## 解决什么问题
 
 Claude Code 原生的 `WebSearch` / `WebFetch` 工具**绑定 Anthropic API**。一旦把基座模型换成
 Gemini、OpenRouter、本地模型等非 Anthropic 模型，这些工具就会失灵。
 
-本工具直连 Codex（或可选 Grok）的独立搜索端点，**与底层模型完全无关**——无论客户端用哪个模型，
+本工具直连 Codex 的独立搜索端点，**与底层模型完全无关**——无论客户端用哪个模型，
 都能通过 MCP 工具获得实时联网搜索能力，且**不消耗 GPT/Codex 的推理 token**（只占用账号搜索额度，见下）。
 
 ## 工作原理
@@ -25,19 +24,13 @@ Gemini、OpenRouter、本地模型等非 Anthropic 模型，这些工具就会�
 Claude Code / 任意 MCP 客户端（任意模型）
    ├── codex_web_search(query)          # 单步快速搜索
    ├── codex_web_research(...)          # 多步深度研究（search→open→find→click，靠 ref_id 串联）
-   ├── web_fetch(url)                   # 抓取任意 URL 纯文本（补足搜到却读不到正文的短板）
-   ├── get_sources(...)                 # 分页重取上一次来源（避免重复搜索）
-   ├── doctor()                         # 自检：连通性 + 脱敏配置
-   └── web_map(url)                     # Tavily Map 发现域名下 URL
+   └── web_fetch(url)                   # 抓取任意 URL 纯文本（补足搜到却读不到正文的短板）
           │
           ▼
-   ┌─────────────────────┐   默认    ┌──────────────────────────┐
-   │  OpenAI Codex 搜索   │ ───────▶ │ /backend-api/codex/alpha  │
-   │  端点（免费登录态）  │          │ /search                   │
-   └─────────────────────┘          └──────────────────────────┘
-   ┌─────────────────────┐   可选    ┌──────────────────────────┐
-   │  Grok / xAI          │ ───────▶ │ /v1/responses + web_search│
-   └─────────────────────┘          └──────────────────────────┘
+   ┌─────────────────────┐
+   │  OpenAI Codex 搜索   │ ───────▶  /backend-api/codex/alpha/search
+   │  端点（免费登录态）  │
+   └─────────────────────┘
 ```
 
 - Codex 端点不执行 GPT 推理，只返回结构化搜索结果（**零 GPT token**）。
@@ -50,13 +43,7 @@ Claude Code / 任意 MCP 客户端（任意模型）
 
 ## 依赖与环境
 
-1. **Rust 工具链**（`rustup` + `cargo`，stable 即可）。
-   - **Windows**：需要 **Visual Studio 2023 的 MSVC 工具链**（含 `link.exe`）+ Windows SDK。
-     Git Bash 自带的 `/usr/bin/link` 会抢占 MSVC 的 `link.exe`，且本沙箱禁止从 Bash/PowerShell 调
-     `cmd.exe`，所以**不能用 `cmd /c vcvarsall.bat`**。本仓库的 `scripts/build.sh` 改为直接导出 VS
-     环境变量来编译（见下文「编译」）。
-   - **macOS / Linux**：系统 clang/gcc 即可，标准 `cargo build` 开箱即用。
-2. **有效的 Codex 登录凭证（必做）**——直连 Codex 搜索端点，必须有登录态，否则工具返回清晰报错而非崩溃。
+1. **有效的 Codex 登录凭证（必做）**——直连 Codex 搜索端点，必须有登录态，否则工具返回清晰报错而非崩溃。
    凭证二选一：
    - **方式 1（推荐，零手动配置）**：`codex login`，OAuth 自动把 token 写入 `~/.codex/auth.json`；
    - **方式 2（免 auth.json）**：环境变量 `CODEX_ACCESS_TOKEN`（可选 `CODEX_ACCOUNT_ID`）。
@@ -100,14 +87,11 @@ export CODEX_ACCOUNT_ID="你的account_id"     # 可选
 
 ## 安装（开箱即用，推荐）
 
-本项目是**独立原生二进制**，无需安装 Rust、无需 Node、无需 npm 账号即可使用。两种拿到二进制的方式：
+本项目是**独立原生二进制**，无需安装 Rust、无需 Node 即可使用。两种拿到二进制的方式：
 
 - **方式 A（推荐）：去 [Releases](https://github.com/dhicoc/codex-web-search-mcp/releases) 下载预编译文件**
   —— 下载即用，零依赖。各平台文件名见下「配置 MCP · 方式 A」。
-- **方式 B（可选）：`npm install -g codex-web-search-mcp`** —— 前提是维护者已发布到 npm（见「发布」）；
-  npm 只下载与你平台匹配的那一份原生二进制，Node 仅作薄壳。
-
-想自己构建见下「编译（Build）」。
+- **方式 B：从源码编译**（见下「编译（Build）」），产物直接运行。
 
 ## 编译（Build）
 
@@ -131,12 +115,12 @@ cargo build --release
 # 产物： target/release/codex-web-search-mcp
 ```
 
-## 安装与配置（MCP）
+## 配置 MCP
 
 ### 方式 A：下载预编译二进制（开箱即用，推荐）
 
 去 [Releases](https://github.com/dhicoc/codex-web-search-mcp/releases) 下载与你平台匹配的文件，
-放到任意目录即可使用——**不需要 Rust、不需要 Node、不需要 npm 账号**：
+放到任意目录即可使用——**不需要 Rust、不需要 Node**：
 
 | 平台 | 文件名 |
 |------|--------|
@@ -162,19 +146,7 @@ MCP 配置（把 `command` 换成你下载的文件路径）：
 - 改完重启客户端即可；首次在客户端里查看是否连上（如 Claude Code 的 `/mcp`）。
 - 写入用户级配置（如 `~/.claude.json`）的 `mcpServers` 即对所有项目生效。
 
-### 方式 B：npm 全局安装（可选，需维护者已发布到 npm）
-
-无需 Rust、无需手动编译，一条命令装好跨平台预编译二进制（前提是维护者已发布到 npm，见「发布」）：
-
-```bash
-npm install -g codex-web-search-mcp
-```
-
-`codex-web-search-mcp` 命令本质是个 Node 薄壳（`npm/codex-web-search-mcp/run.js`），按当前平台从对应的
-`@dhicoc/codex-web-search-mcp-<platform>` 子包里取出预编译的 Rust 二进制并启动。MCP `command` 设为
-`codex-web-search-mcp` 即可（其余同方式 A 的 json，仅 `command` 改为 `"codex-web-search-mcp"`）。
-
-### 方式 C：从源码编译（无 npm / 想自己构建）
+### 方式 B：从源码编译（无预编译 / 想自己构建）
 
 Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 exe（或 macOS/Linux 下的二进制）即可，**不需要 Node**。
 
@@ -193,41 +165,9 @@ Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 
 - 改完重启客户端即可；首次在客户端里查看是否连上（如 Claude Code 的 `/mcp`）。
 - 写入用户级配置（如 `~/.claude.json`）的 `mcpServers` 即对所有项目生效。
 
-> 可选项：在 MCP 配置的 `"env"` 里加环境变量（`CODEX_ACCESS_TOKEN`、`CODEX_SEARCH_BACKEND=grok` 等），
-> 见下「配置」。若用方式 1 的 `codex login`，连 exe 路径都不用配 env。
+> 可选项：在 MCP 配置的 `"env"` 里加 `CODEX_ACCESS_TOKEN` 覆盖凭证（方式 2）。若用 `codex login`，连 exe 路径都不用配 env。
 
 > ⚠️ **不要用** `"command": "cmd", "args": ["/c", ...]` —— 会破坏 MCP stdio 管道导致超时 / -32000。
-
-### 旧版 Node 脚本（已弃用，保留作兜底）
-
-仓库里仍保留 `codex-web-search-mcp.js`（v1.x 单文件 Node 版）。如需用 Node 方式运行，可
-`node codex-web-search-mcp.js` 或 `npx -y github:dhicoc/codex-web-search-mcp`。**推荐用上面的 Rust 版**
-（方式 A 开箱即用，或方式 C 自编译），功能更全且无需 Node。
-
-## 配置（config.toml）
-
-默认读取 `~/.config/codex-web-search-mcp/config.toml`（可用 `CODEX_SEARCH_CONFIG` 覆盖路径）。
-示例：
-
-```toml
-# 可选后端切换：设为 "grok" 且提供 key 时启用 Grok/xAI 后端
-# CODEX_SEARCH_BACKEND = "codex"
-
-# Grok / xAI 后端（CODEX_SEARCH_BACKEND=grok 时生效）
-grok_api_key   = "xai-..."        # 或环境变量 GROK_SEARCH_API_KEY / XAI_API_KEY
-grok_base_url  = "https://api.x.ai"
-grok_model     = "grok-4.1-fast"
-
-# web_map 工具所需
-tavily_api_key = "tvly-..."
-
-# 预算 / 分页控制
-response_max_chars = 8000         # 输出超过该字符数则截断（省 token）
-max_inline_sources = 10           # 结果里最多内联展示的来源条数
-```
-
-等效的环境变量（优先级高于 config.toml）：`CODEX_SEARCH_BACKEND`、`GROK_SEARCH_API_KEY` /
-`XAI_API_KEY`、`GROK_SEARCH_URL`、`GROK_SEARCH_MODEL`、`TAVILY_API_KEY`。
 
 ## 工具一览
 
@@ -266,33 +206,9 @@ max_inline_sources = 10           # 结果里最多内联展示的来源条数
 返回剥离脚本/样式/标签后的纯文本。补足「搜到链接却读不到正文、JS 渲染页读不到」的短板。
 （注意：纯 JS 动态渲染、需登录的页面仍可能读不到内容，这是服务端 fetch 的能力边界。）
 
-### `get_sources`（分页重取来源）
+## 调试与排错
 
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `session_id` | string | 可选，默认当前会话 |
-| `offset` | number | 起始序号，从 0 |
-| `limit` | number | 返回条数，默认 10 |
-
-避免重复搜索：拿上一次 `codex_web_search` / `codex_web_research` 缓存在会话里的来源，分页浏览。
-
-### `doctor`（自检）
-
-无参数。探测 Codex 端点连通性，并脱敏展示当前配置（后端、各 API key 是否已设置）。排错首选。
-
-### `web_map`（域名发现）
-
-| 参数 | 类型 | 说明 |
-|------|------|------|
-| `url` | string（必填） | 要映射的域名或起始 URL |
-
-经 Tavily Map 发现某域名下的 URL 列表。**需要 `TAVILY_API_KEY`**。
-
-## 调试
-
-直接用 `doctor` 工具做自检；或在终端手动运行 exe 并用 `initialize` / `tools/list` 验证握手。
-
-## 排错
+直接用 `initialize` / `tools/list` 在终端手动运行 exe 验证握手；或在客户端里用 `/mcp` 查看是否连上。
 
 | 现象 | 原因 / 解决 |
 |------|-------------|
@@ -308,31 +224,18 @@ max_inline_sources = 10           # 结果里最多内联展示的来源条数
 |------|------------------------|-------------------|------------------------|
 | 语言 | TypeScript | 单文件 Node 脚本 | **Rust** |
 | 运行依赖 | Node + TS | Node | **无（独立二进制）** |
-| 后端 | Codex | Codex | Codex + **可选 Grok/xAI** |
-| 工具数 | search/research | 2 | **6**（新增 web_fetch/get_sources/doctor/web_map） |
-| 预算/分页 | — | — | **response_max_chars / max_inline_sources / get_sources** |
+| 后端 | Codex | Codex | Codex |
+| 工具数 | search/research | 2 | **3**（新增 web_fetch） |
+| 引用清理 | PUA 私有区字符 | PUA 私有区字符 | **重写为可读 `[turn0searchN: 标题 → 域名]`** |
 
 ## 发布（维护者）
 
-二进制由 GitHub Actions 自动构建（`.github/workflows/release.yml`）。**主路径只发 GitHub Release 二进制，
-不需要 npm 账号**：
+二进制由 GitHub Actions 自动构建（`.github/workflows/release.yml`）：打 tag 即跨平台编译，
+并在 GitHub Release 附上 5 个平台的原生二进制（`codex-web-search-mcp-<platform>`）。
+用户走「方式 A」下载即用，**无需任何 npm 账号**。
 
-1. 打 tag 并推送：`git tag v2.0.1 && git push origin v2.0.1`（也可用 Actions 页面的 `workflow_dispatch` 手动触发并填版本号）。
-2. CI 自动跨平台编译，并在 GitHub Release 附上 5 个平台的原生二进制（`codex-web-search-mcp-<platform>`）。
-   用户走「方式 A」下载即用——**全程无需 NPM_TOKEN**。
+```bash
+git tag v2.0.1 && git push origin v2.0.1
+```
 
-### （可选）同时发布到 npm
-
-若还想让用户 `npm install -g`，需额外：
-
-1. 在仓库 **Settings → Secrets** 配置 `NPM_TOKEN`（npm 发布 token，需 publish 权限）。
-2. 若你的 npm 账号不是 `dhicoc`，先把子包 scope（`@dhicoc/...`）与元包 `optionalDependencies` 改成你的 scope。
-3. 再次打 tag 触发；有 `NPM_TOKEN` 时 CI 会额外发布 5 个 `@dhicoc/codex-web-search-mcp-<platform>` 子包 + 元包。
-
-> 脚本 `scripts/set-version.js <版本>` 会把版本号同步到 `Cargo.toml` 与所有 npm 包。
-> 没配 `NPM_TOKEN` 时，npm 发布步骤自动跳过，**不影响 Release 二进制产出**。
-
-## 后续可扩展
-
-- 多 provider 链（Exa / Firecrawl）接入 `web_fetch` / `web_map`（`source_providers` 配置位已预留思路）。
-- `codex_web_research` 的 `open` 返回页内链接 `ref_id` 结构化抽取，进一步降低模型引用成本。
+> 二进制文件名在 CI 里按平台重命名（`win32-x64` / `darwin-universal` 等），与上方「方式 A」表格一致。
