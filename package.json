@@ -1,25 +1,22 @@
 {
   "name": "codex-web-search-mcp",
-  "version": "1.1.0",
-  "description": "Model-independent web search & deep research MCP server for Claude Code, powered by OpenAI Codex's standalone search endpoint. Works with any model (Gemini / OpenRouter / local) and bypasses native WebSearch's Anthropic lock-in.",
-  "type": "commonjs",
+  "version": "2.0.0",
+  "description": "Model-independent web search & deep research MCP server (Rust rewrite). Backends: OpenAI Codex (default, free with ChatGPT login) and optional Grok/xAI. New tools: web_fetch, get_sources (pagination/budget), doctor, web_map. Runs as a standalone binary — no Node required.",
   "bin": {
-    "codex-web-search-mcp": "codex-web-search-mcp.js"
+    "codex-web-search-mcp": "target/release/codex-web-search-mcp"
   },
   "keywords": [
     "mcp",
     "claude-code",
-    "claude",
     "web-search",
     "codex",
+    "grok",
     "openai",
     "deep-research",
-    "model-independent"
+    "model-independent",
+    "rust"
   ],
   "license": "MIT",
-  "engines": {
-    "node": ">=18"
-  },
   "repository": {
     "type": "git",
     "url": "https://github.com/dhicoc/codex-web-search-mcp.git"
@@ -29,13 +26,15 @@
     "url": "https://github.com/dhicoc/codex-web-search-mcp/issues"
   },
   "scripts": {
-    "start": "node codex-web-search-mcp.js"
+    "build": "cargo build --release",
+    "start": "cargo run --release"
   },
   "publishConfig": {
     "registry": "https://registry.npmjs.org/"
   },
   "files": [
-    "codex-web-search-mcp.js",
+    "target/release/codex-web-search-mcp",
+    "target/release/codex-web-search-mcp.exe",
     "README.md",
     "LICENSE"
   ]

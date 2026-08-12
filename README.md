@@ -1,200 +1,180 @@
 # codex-web-search-mcp
 
-一个**零依赖**的 MCP (Model Context Protocol) server，把 OpenAI Codex 的独立搜索端点
-（`chatgpt.com/backend-api/codex/alpha/search`）封装成 Claude Code 可用的两个工具：
+一个**模型无关**的 MCP (Model Context Protocol) server，把 OpenAI Codex 的独立搜索端点
+（`chatgpt.com/backend-api/codex/alpha/search`）封装成 Claude Code / 任意 MCP 客户端可用的联网搜索工具。
+**v2.0.0 起用 Rust 全量重写**，并参考 [Episkey-G/GrokSearch-rs](https://github.com/Episkey-G/GrokSearch-rs) 做了能力升级：
 
-- **`codex_web_search`** —— 单步快速搜索（问一句、返回答案 + 来源列表）；
-- **`codex_web_research`** —— 多步深度研究（搜 → 打开文档 → 页内查找 → 点击链接，靠 `ref_id` 串联）。
+- 默认后端 **OpenAI Codex**（免费，只要 `codex login` 登录态），可选后端 **Grok/xAI**；
+- 6 个工具：`codex_web_search`、`codex_web_research`、`web_fetch`、`get_sources`（分页+预算）、`doctor`、`web_map`；
+- 独立二进制，**不再依赖 Node / npx**（编译一次，直接运行 exe）。
 
-> 灵感与端点实现来自 [mateusdcc/pi-gpt-search](https://github.com/mateusdcc/pi-gpt-search)（MIT）。
-> 原项目是给 **Pi Coding Agent**（`pi` CLI）用的插件，无法在 Claude Code 里直接跑；
-> 这里重写为 Claude Code 可用的 MCP server。
+> 灵感与端点实现来自 [mateusdcc/pi-gpt-search](https://github.com/mateusdcc/pi-gpt-search)（MIT）；
+> v2 的能力模型（多后端、web_fetch、doctor、预算控制、web_map）参考 [Episkey-G/GrokSearch-rs](https://github.com/Episkey-G/GrokSearch-rs)。
 
 ## 解决什么问题
 
-Claude Code 原生的 `WebSearch` / `WebFetch` 工具是**绑定 Anthropic API** 的。
-一旦你把基座模型换成 Gemini、OpenRouter、本地模型等非 Anthropic 模型，这些工具就会失灵或体验很差。
+Claude Code 原生的 `WebSearch` / `WebFetch` 工具**绑定 Anthropic API**。一旦把基座模型换成
+Gemini、OpenRouter、本地模型等非 Anthropic 模型，这些工具就会失灵。
 
-本工具直连 Codex 的独立搜索端点，**与底层模型完全无关**——无论 Claude Code 当前用哪个模型，
-都能通过 MCP 工具获得实时联网搜索能力，且不会消耗 GPT/Codex 的推理 token。
+本工具直连 Codex（或可选 Grok）的独立搜索端点，**与底层模型完全无关**——无论客户端用哪个模型，
+都能通过 MCP 工具获得实时联网搜索能力，且**不消耗 GPT/Codex 的推理 token**（只占用账号搜索额度，见下）。
 
 ## 工作原理
 
 ```
-Claude Code（任意模型）
-   ├── codex_web_search(query)              # 单步快速搜索
-   │      └── POST /codex/alpha/search  { commands: { search_query:[{q}] } }
-   │
-   └── codex_web_research(...)              # 多步深度研究
-          └── POST /codex/alpha/search  { commands: { search_query/open/find/click } }
-                └── 同一会话(id)内靠 ref_id 串联多次操作
-                      search → 拿到 ref_id(turn0search0)
-                      open(ref_id) → 返回文档正文
-                      find(ref_id, pattern) → 在文档内定位
-                      click(ref_id, id) → 跟随链接
+Claude Code / 任意 MCP 客户端（任意模型）
+   ├── codex_web_search(query)          # 单步快速搜索
+   ├── codex_web_research(...)          # 多步深度研究（search→open→find→click，靠 ref_id 串联）
+   ├── web_fetch(url)                   # 抓取任意 URL 纯文本（补足搜到却读不到正文的短板）
+   ├── get_sources(...)                 # 分页重取上一次来源（避免重复搜索）
+   ├── doctor()                         # 自检：连通性 + 脱敏配置
+   └── web_map(url)                     # Tavily Map 发现域名下 URL
+          │
+          ▼
+   ┌─────────────────────┐   默认    ┌──────────────────────────┐
+   │  OpenAI Codex 搜索   │ ───────▶ │ /backend-api/codex/alpha  │
+   │  端点（免费登录态）  │          │ /search                   │
+   └─────────────────────┘          └──────────────────────────┘
+   ┌─────────────────────┐   可选    ┌──────────────────────────┐
+   │  Grok / xAI          │ ───────▶ │ /v1/responses + web_search│
+   └─────────────────────┘          └──────────────────────────┘
 ```
 
-- 端点不执行 GPT 推理，只返回结构化搜索结果（零 GPT token）。
+- Codex 端点不执行 GPT 推理，只返回结构化搜索结果（**零 GPT token**）。
 - `model` 字段仅作为接口要求的标签（固定 `gpt-4o`），不代表实际调用 GPT。
-- **`search_query` / `open` / `find` / `click` 都是同一个端点 `commands` 里的并列操作**，
-  后端靠请求体的 `id`（会话 id）维持上下文，使后续 `open`/`find`/`click` 能解析上一次搜索返回的 `ref_id`。
-  本 server 在多次 tool call 之间**复用同一会话 id**，并把 `ref_id` 暴露在来源列表里，模型即可多轮编排。
-- 502/503/504 会自动重试最多 2 次。
+- `search_query` / `open` / `find` / `click` 都是同一个端点 `commands` 里的并列操作，后端靠请求体的
+  会话 `id` 维持上下文，使后续 `open`/`find`/`click` 能解析上一次搜索返回的 `ref_id`。本 server 在多次
+  tool call 之间复用同一会话 id，并把 `ref_id` 暴露在来源列表里，模型即可多轮编排。
+- 引用标记现在返回为 `[turn0searchN: 标题 → 域名]` 形式（旧版是 PUA 私有区字符，已重写清理），
+  模型可直接拿 `turn0searchN` 这种 `ref_id` 去做 `open` / `click`。
 
 ## 依赖与环境
 
-1. **Node.js** v18+（v22 已自带全局 `fetch`，无需安装任何 npm 包）。
-2. **有效的 Codex 登录凭证（必做）**——本工具直连 Codex 搜索端点，必须有登录态才能用，否则工具会返回清晰的报错而不是崩溃。凭证二选一：
-   - **方式 1（推荐，零手动配置）**：运行 `codex login`，由 OAuth 自动把 token 写入 `~/.codex/auth.json`；
-   - **方式 2（免 auth.json）**：设置环境变量 `CODEX_ACCESS_TOKEN`（可选 `CODEX_ACCOUNT_ID`）。
+1. **Rust 工具链**（`rustup` + `cargo`，stable 即可）。
+   - **Windows**：需要 **Visual Studio 2023 的 MSVC 工具链**（含 `link.exe`）+ Windows SDK。
+     Git Bash 自带的 `/usr/bin/link` 会抢占 MSVC 的 `link.exe`，且本沙箱禁止从 Bash/PowerShell 调
+     `cmd.exe`，所以**不能用 `cmd /c vcvarsall.bat`**。本仓库的 `scripts/build.sh` 改为直接导出 VS
+     环境变量来编译（见下文「编译」）。
+   - **macOS / Linux**：系统 clang/gcc 即可，标准 `cargo build` 开箱即用。
+2. **有效的 Codex 登录凭证（必做）**——直连 Codex 搜索端点，必须有登录态，否则工具返回清晰报错而非崩溃。
+   凭证二选一：
+   - **方式 1（推荐，零手动配置）**：`codex login`，OAuth 自动把 token 写入 `~/.codex/auth.json`；
+   - **方式 2（免 auth.json）**：环境变量 `CODEX_ACCESS_TOKEN`（可选 `CODEX_ACCOUNT_ID`）。
 
-> 没有 ChatGPT/Codex 账号、未登录、或会话过期（`401/403`）时，工具会返回明确的中文报错，而不是崩溃——按下面步骤补上凭证即可。
+> 没有 ChatGPT/Codex 账号、未登录、或会话过期（`401/403`）时，工具会返回明确的中文报错，而不是崩溃。
 
-> **成本与额度提醒**：本工具**不按 GPT 生成 token 计费**——它调用的是 Codex 的 `search` 端点（`/backend-api/codex/alpha/search`），而非 `chat/completions` 文本生成。但每次搜索都会**占用你 ChatGPT/Codex 账号的搜索额度与速率配额**（服务端按账号限流，超限返回 `429`）。要点：
-> - 需要**有效的 ChatGPT/Codex 登录态**；免费账号通常可用但频率/总量受限，高频或重度使用建议 Pro/Plus 账号。
-> - 它**不是「零 OpenAI 资源」**：与纯本地的 Playwright 类浏览器工具（完全不碰 OpenAI）不同，本工具依赖 OpenAI 搜索后端，每次调用都会消耗对应账号额度。
-> - 触发 `401/403`（凭证过期/权限不足）或 `429`（速率超限）时，按下方步骤重登录或稍后重试即可。
+> **成本与额度提醒**：本工具**不按 GPT 生成 token 计费**——它调用的是 Codex 的 `search` 端点
+> （`/backend-api/codex/alpha/search`），而非 `chat/completions` 文本生成。但每次搜索都会**占用你
+> ChatGPT/Codex 账号的搜索额度与速率配额**（服务端按账号限流，超限返回 `429`）。要点：
+> - 需要**有效的 ChatGPT/Codex 登录态**；免费账号通常可用但频率/总量受限，高频或重度使用建议 Pro/Plus。
+> - 它**不是「零 OpenAI 资源」**：与纯本地 Playwright 类浏览器工具（完全不碰 OpenAI）不同，本工具依赖
+>   OpenAI 搜索后端，每次调用都会消耗对应账号额度。
+> - 触发 `401/403`（凭证过期/权限不足）或 `429`（速率超限）时，重登录或稍后重试即可。
 
 ### 获取 Codex 凭证（必做）
 
-> **不必手动编写 `auth.json`**：它是 `codex login` 的 OAuth 产物（里面是颁发的 token），手搓无效。让 `codex login` 自动生成，或改用环境变量方式。
+> **不必手动编写 `auth.json`**：它是 `codex login` 的 OAuth 产物，手搓无效。让 `codex login` 自动生成，或改用环境变量。
 
-**方式 1：`codex login`（推荐，自动生成 auth.json）**
+**方式 1：`codex login`（推荐）**
 
-1. 安装 Codex CLI（仅需装一次）：
-   ```bash
-   npm install -g @openai/codex
-   ```
-   > 国内网络卡可加镜像：`npm install -g @openai/codex --registry=https://registry.npmmirror.com`
-2. 登录（会打开浏览器走 ChatGPT/OpenAI OAuth）：
-   ```bash
-   codex login
-   ```
-3. 登录成功后自动写入 `~/.codex/auth.json`（含 `tokens.access_token` / `tokens.account_id`）。**本 server 会自动读取，无需任何额外配置。**
-4. 验证：`cat ~/.codex/auth.json` 能看到 `tokens` 字段即成功。
+```bash
+npm install -g @openai/codex        # 国内: --registry=https://registry.npmmirror.com
+codex login                         # 浏览器走 ChatGPT/OpenAI OAuth
+```
+登录成功后自动写入 `~/.codex/auth.json`（含 `tokens.access_token` / `tokens.account_id`）。
+**server 会自动读取，无需额外配置。**
 
 **方式 2：环境变量 `CODEX_ACCESS_TOKEN`（免 auth.json）**
 
-不想装 Codex CLI、或想在服务器 / CI 上用：直接提供 token 即可，无需 auth.json。
-
 ```bash
-# Windows PowerShell（仅当前会话）
+# Windows PowerShell
 $env:CODEX_ACCESS_TOKEN = "你的token"
-$env:CODEX_ACCOUNT_ID  = "你的account_id"   # 可选，部分端点需要
+$env:CODEX_ACCOUNT_ID  = "你的account_id"   # 可选
 
 # macOS / Linux
 export CODEX_ACCESS_TOKEN="你的token"
 export CODEX_ACCOUNT_ID="你的account_id"     # 可选
 ```
 
-- 想让 Claude Code 每次启动都带上，可把上面的 `export` 写进 shell 配置文件（`~/.zshrc` / `~/.bashrc`），或在 Claude Code 的 MCP 配置里加 `"env": { "CODEX_ACCESS_TOKEN": "..." }`。
-- `account_id` 可从方式 1 生成的 `~/.codex/auth.json` 的 `tokens.account_id` 字段抄过来（有时端点需要它来区分账号）。
+> 凭证过期（`401/403`）：方式 1 重新 `codex login`；方式 2 换新 token。
 
-> 凭证过期（`401/403`）时：方式 1 重新 `codex login`；方式 2 换一个新 token。
+## 编译（Build）
 
-## 安装与配置（Claude Code）
-
-> **先判断你的 Node 类型（决定用哪种写法）**
-> - **标准 Node（最常见）**：从 nodejs.org 安装或系统自带的 Node，裸 `npx` 能正常解析 `.cmd` / shebang。→ 推荐 **方式 B（npx，免路径）**，最简单。
-> - **受管 / 便携 Node**：某些 AI 工具（如 WorkBuddy）内置的 Node，spawn 时解析不出 `npx` / `.cmd` shim，裸 `npx` 会 `ENOENT` → 30s 超时。→ 必须用 **方式 A（`node` + 全局脚本路径）**。
-> - 不确定？先试方式 B；若 `/mcp` 报 `timed out` 或 `-32000`，退回方式 A。
-
-> ⚠️ **两处致命错误（实测）**：
-> 1. **绝不要手动 `cmd /c` 包裹命令**（`"command": "cmd", "args": ["/c", ...]`）——破坏 MCP stdio 管道，必现 `timed out after 30000ms` 或 `-32000`。Claude Code 自己会拉起 `command`，别套 shell。
-> 2. 路径要写成**绝对路径**，且指向 `.js` 文件（不是 `.cmd` / 目录）。
-
-### 方式 A：`node` + 全局脚本绝对路径（★ 最可靠，任何 Node 都能用，免 npm 账号）
-
-无需 npm 账号，直接从 GitHub 全局安装：
+### Windows（MSVC）
 
 ```bash
-npm install -g github:dhicoc/codex-web-search-mcp
+# 本仓库脚本已注入 VS 2023 环境（INCLUDE/LIB 用反斜杠，避开 LNK1181）
+bash scripts/build.sh --release
+# 产物： target/release/codex-web-search-mcp.exe
 ```
 
-安装完成后，用 `npm root -g` 找到全局目录，把脚本绝对路径填进 `.mcp.json` / `~/.claude.json` 的 `mcpServers`：
+> ⚠️ **编译坑（已踩过）**：MSVC 的 `link.exe` / `cl.exe` 只认「反斜杠 + `C:\` 盘符」的
+> `INCLUDE`/`LIB` 路径。用正斜杠 `/` 或 `/c/` 风格会报
+> `LNK1181: 无法打开输入文件“kernel32.lib”`。本脚本已处理；若手动编译，务必导出带反斜杠的
+> `INCLUDE`/`LIB` 并指向 MSVC 的 `Hostx64/x64/link.exe`。
 
-```json
-{
-  "mcpServers": {
-    "codex-web-search": {
-      "command": "node",
-      "args": ["<npm root -g 的输出>/codex-web-search-mcp/codex-web-search-mcp.js"]
-    }
-  }
-}
-```
-
-- **Windows（标准 Node）**：`<npm root -g>` 通常是 `C:/Users/<用户名>/AppData/Roaming/npm/node_modules`，路径形如
-  `C:/Users/你的用户名/AppData/Roaming/npm/node_modules/codex-web-search-mcp/codex-web-search-mcp.js`。
-- **macOS / Linux**：通常是 `/usr/local/lib/node_modules`，路径形如
-  `/usr/local/lib/node_modules/codex-web-search-mcp/codex-web-search-mcp.js`。
-- 嫌手填麻烦，可用命令直接向 stdout 打印完整路径再复制：
-  - PowerShell：`Write-Output "$((npm root -g))/codex-web-search-mcp/codex-web-search-mcp.js"`
-  - bash：`echo "$(npm root -g)/codex-web-search-mcp/codex-web-search-mcp.js"`
-
-`node` 是 `.exe`（Windows）/ 可执行文件，`command` 直接写 `node` 即可，Claude Code 能通过它直接 spawn 脚本，**不经过 `.cmd` 解析**——所以在受管 / 便携 Node 环境下也能稳定连上（已实测 `√ Connected`）。
-
-### 方式 B：npx 直接拉（标准 Node 首选，免路径）
-
-如果你的 Node 是**标准安装**（裸 `npx` 能正常解析 `.cmd` / shebang），用社区标准写法，无需关心路径：
-
-```json
-{
-  "mcpServers": {
-    "codex-web-search": {
-      "command": "npx",
-      "args": ["-y", "github:dhicoc/codex-web-search-mcp"]
-    }
-  }
-}
-```
-
-> 首次运行 `npx` 会从 GitHub 拉取并缓存，之后走缓存；升级只需再次触发或清缓存。
-> **注意**：在受管 / 便携 Node 环境（如本工作区捆绑的 Node 22.22.2）实测失败（`spawn npx ENOENT` → 30s 超时）。那种环境请用方式 A。
-
-### 方式 C：从源码运行（开发 / 调试用）
-
-把本仓库 clone / 下载下来，用 `node` 指向脚本绝对路径（跨平台一致，天然避开 `.cmd` 问题）：
-
-```json
-{
-  "mcpServers": {
-    "codex-web-search": {
-      "command": "node",
-      "args": ["/absolute/path/to/codex-web-search-mcp.js"]
-    }
-  }
-}
-```
-
-> **macOS / Linux（标准 Node）**：全局安装后也可用裸命令 `codex-web-search-mcp`（bin 带 shebang，无 `.cmd` 问题）。
-> 首次在 Claude Code 里运行 `/mcp` 查看是否连上，首次会要求批准；改完重启 Claude Code 即可。
-> 写入用户级 `~/.claude.json` 的 `mcpServers` 即可对所有项目生效。
-
-### 发布到 npm（可选，获得更短的命令名）
-
-如果你想要不带 `github:` 前缀的 `npx -y codex-web-search-mcp`（更易记），需要把包装到 npmjs.com。
-这需要你有一个 npm 账号——**没有账号或忘了密码都不影响上面三种方式**，只是短命令名要用：
-
-- 没账号：去 https://www.npmjs.com/signup 免费注册一个；
-- 忘了密码：去 https://www.npmjs.com/forgot-password 用注册邮箱重置；
-- 登录官方源后发布（本仓库 `package.json` 的 `publishConfig` 已锁定官方源）：
+### macOS / Linux
 
 ```bash
-npm login --registry https://registry.npmjs.org/
-npm publish
+cargo build --release
+# 产物： target/release/codex-web-search-mcp
 ```
 
-包名 `codex-web-search-mcp` 已确认未被占用。
+## 安装与配置（MCP）
 
-## 使用
+Rust 版是**独立二进制**，直接让客户端 spawn 这个 exe（或 macOS/Linux 下的二进制）即可，**不需要 Node**。
 
-配置连上后，直接在对话里让模型去搜就行，例如：
+```json
+{
+  "mcpServers": {
+    "codex-web-search": {
+      "command": "C:/path/to/codex-web-search-mcp/target/release/codex-web-search-mcp.exe"
+    }
+  }
+}
+```
 
-- “帮我搜一下最新版 Rust 的发布说明”
-- “查一下 Vite 6 和 Vite 7 的破坏性变更”
+- macOS / Linux：把 `command` 换成 `/path/to/codex-web-search-mcp/target/release/codex-web-search-mcp`。
+- 改完重启客户端即可；首次在客户端里查看是否连上（如 Claude Code 的 `/mcp`）。
+- 写入用户级配置（如 `~/.claude.json`）的 `mcpServers` 即对所有项目生效。
 
-模型会自动调用 `codex_web_search` 工具。你也可以显式要求它使用这个工具而不是其他搜索方式。
+> 可选项：在 MCP 配置的 `"env"` 里加环境变量（`CODEX_ACCESS_TOKEN`、`CODEX_SEARCH_BACKEND=grok` 等），
+> 见下「配置」。若用方式 1 的 `codex login`，连 exe 路径都不用配 env。
+
+> ⚠️ **不要用** `"command": "cmd", "args": ["/c", ...]` —— 会破坏 MCP stdio 管道导致超时 / -32000。
+
+### 旧版 Node 脚本（已弃用，保留作兜底）
+
+仓库里仍保留 `codex-web-search-mcp.js`（v1.x 单文件 Node 版）。如需用 Node 方式运行，参考旧 README
+的「方式 A / B」（`node` + 脚本绝对路径，或 `npx -y github:dhicoc/codex-web-search-mcp`）。**推荐用
+Rust 版**，无需 Node 且功能更全。
+
+## 配置（config.toml）
+
+默认读取 `~/.config/codex-web-search-mcp/config.toml`（可用 `CODEX_SEARCH_CONFIG` 覆盖路径）。
+示例：
+
+```toml
+# 可选后端切换：设为 "grok" 且提供 key 时启用 Grok/xAI 后端
+# CODEX_SEARCH_BACKEND = "codex"
+
+# Grok / xAI 后端（CODEX_SEARCH_BACKEND=grok 时生效）
+grok_api_key   = "xai-..."        # 或环境变量 GROK_SEARCH_API_KEY / XAI_API_KEY
+grok_base_url  = "https://api.x.ai"
+grok_model     = "grok-4.1-fast"
+
+# web_map 工具所需
+tavily_api_key = "tvly-..."
+
+# 预算 / 分页控制
+response_max_chars = 8000         # 输出超过该字符数则截断（省 token）
+max_inline_sources = 10           # 结果里最多内联展示的来源条数
+```
+
+等效的环境变量（优先级高于 config.toml）：`CODEX_SEARCH_BACKEND`、`GROK_SEARCH_API_KEY` /
+`XAI_API_KEY`、`GROK_SEARCH_URL`、`GROK_SEARCH_MODEL`、`TAVILY_API_KEY`。
+
+## 工具一览
 
 ### `codex_web_search`（单步搜索）
 
@@ -207,9 +187,9 @@ npm publish
 
 ### `codex_web_research`（多步深度研究）
 
-适合「需要打开官网文档、在长文里找关键段落、跟随链接深挖」的场景。所有操作可在**一次调用**里组合，
-也可**分多轮**调用（依靠自动维持的会话上下文，用上一轮返回的 `ref_id` 串联）。来源列表里会带 `(ref: turn0search0)` 这样的 id，
-模型在后续 `open`/`find`/`click` 里直接引用即可。
+适合「打开官网文档、长文里找关键段落、跟随链接深挖」的场景。所有操作可在一次调用里组合，
+也可分多轮调用（靠自动维持的会话上下文，用上一轮返回的 `ref_id` 串联）。来源列表里会带
+`[turn0search0: 标题 → 域名]` 这样的标记，模型在后续 `open`/`find`/`click` 里直接引用 `turn0search0` 即可。
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
@@ -222,14 +202,40 @@ npm publish
 
 > 至少提供 `search_query` / `open` / `find` / `click` 中的一项；四项都空会报错。
 
-典型用法（让模型自己编排即可，无需手动拼参数）：
+### `web_fetch`（抓正文）
 
-- “搜一下 Rust 最新版发布说明，打开官方博客，找到 1.96 里关于 async 的改动”
-- “查 Vite 7 的迁移指南，打开文档后定位 breaking changes 那一节”
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `url` | string（必填） | 要抓取的网址 |
 
-### 调试
+返回剥离脚本/样式/标签后的纯文本。补足「搜到链接却读不到正文、JS 渲染页读不到」的短板。
+（注意：纯 JS 动态渲染、需登录的页面仍可能读不到内容，这是服务端 fetch 的能力边界。）
 
-设环境变量 `CODEX_SEARCH_DEBUG=1`，server 启动与每次请求会向 stderr 打印日志（含会话 id 与请求 commands）。
+### `get_sources`（分页重取来源）
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `session_id` | string | 可选，默认当前会话 |
+| `offset` | number | 起始序号，从 0 |
+| `limit` | number | 返回条数，默认 10 |
+
+避免重复搜索：拿上一次 `codex_web_search` / `codex_web_research` 缓存在会话里的来源，分页浏览。
+
+### `doctor`（自检）
+
+无参数。探测 Codex 端点连通性，并脱敏展示当前配置（后端、各 API key 是否已设置）。排错首选。
+
+### `web_map`（域名发现）
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `url` | string（必填） | 要映射的域名或起始 URL |
+
+经 Tavily Map 发现某域名下的 URL 列表。**需要 `TAVILY_API_KEY`**。
+
+## 调试
+
+直接用 `doctor` 工具做自检；或在终端手动运行 exe 并用 `initialize` / `tools/list` 验证握手。
 
 ## 排错
 
@@ -238,23 +244,20 @@ npm publish
 | `未找到 Codex 登录凭证` | 没登录。运行 `codex login` 或设置 `CODEX_ACCESS_TOKEN` |
 | `Codex 凭证已过期（HTTP 401/403）` | 会话过期，重新 `codex login` |
 | `触发 Codex 速率限制（HTTP 429）` | 稍后重试，或减少调用频率 |
-| `/mcp` 里显示未连接 | 检查 `node` 是否在 PATH、路径是否正确、JSON 是否合法 |
-| `/mcp` 报 `connection timed out after 30000ms` | 两种原因：① 配置里**手动用了 shell 包裹命令**（如 `"command": "cmd", "args": ["/c", ...]`），破坏 MCP stdio 管道——删掉包裹即可；② **裸 `npx` / 裸 `.cmd` 命令在部分 Node 构建（便携 / 受管版，如某些 AI 工具内置的 Node）上解析不到**（`spawn npx ENOENT`），server 起不来——改用最可靠的 `command: "node"` + `args: ["<全局脚本绝对路径>"]`（路径用 `npm root -g` 查） |
-| `/mcp` 报 `Failed to reconnect ... -32000` | 多为**编辑配置后旧会话残留**——彻底退出并重启 Claude Code 即可。仍失败通常是裸 `npx` / 裸 `.cmd` 在部分 Node 构建（便携 / 受管版）上解析不出（`ENOENT`）——一律改用 `node + 脚本绝对路径`；确认是标准 Node 能解析 `.cmd` 时才用裸 `npx` |
-
-调试时可设环境变量 `CODEX_SEARCH_DEBUG=1`，server 启动时会向 stderr 打印日志。
+| Windows 编译报 `LNK1181: 无法打开输入文件“kernel32.lib”` | `INCLUDE`/`LIB` 用了正斜杠。用 `scripts/build.sh`（已处理反斜杠）或手动导出带 `C:\` 反斜杠的 VS 环境变量 |
+| MCP 显示未连接 / `timed out` / `-32000` | 检查 exe 路径是否正确、JSON 是否合法；确认没用 `cmd /c` 包裹命令 |
 
 ## 与原项目的差异
 
-| 维度 | pi-gpt-search（原） | 本项目 |
-|------|---------------------|--------|
-| 运行平台 | Pi Coding Agent（`pi` CLI） | Claude Code（MCP） |
-| 接入方式 | `~/.pi/agent/extensions/` 插件 | `node` 启动的 stdio MCP server |
-| 暴露形态 | `/gpt-search` 命令 + `codex-search`/`codex-research` 工具 | `codex_web_search` + `codex_web_research` 两个 MCP 工具 |
-| 依赖 | TypeScript 项目 | 零依赖单文件 Node 脚本 |
-| 研究 harness | 支持 `open`/`find`/`click` 多步研究 | 已实现（`codex_web_research`，会话 id 自动复用） |
+| 维度 | pi-gpt-search（原，TS） | 旧版本项目（Node） | **v2.0.0（Rust 重写）** |
+|------|------------------------|-------------------|------------------------|
+| 语言 | TypeScript | 单文件 Node 脚本 | **Rust** |
+| 运行依赖 | Node + TS | Node | **无（独立二进制）** |
+| 后端 | Codex | Codex | Codex + **可选 Grok/xAI** |
+| 工具数 | search/research | 2 | **6**（新增 web_fetch/get_sources/doctor/web_map） |
+| 预算/分页 | — | — | **response_max_chars / max_inline_sources / get_sources** |
 
 ## 后续可扩展
 
-- 增加结果缓存，降低重复查询的速率限制风险。
-- 把 `open` 返回的页面内链接 `ref_id` 显式抽取成结构化列表，进一步降低模型引用成本。
+- 多 provider 链（Exa / Firecrawl）接入 `web_fetch` / `web_map`（`source_providers` 配置位已预留思路）。
+- `codex_web_research` 的 `open` 返回页内链接 `ref_id` 结构化抽取，进一步降低模型引用成本。

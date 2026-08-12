@@ -20,3 +20,6 @@ codex-auth*.json
 *.log
 .DS_Store
 Thumbs.db
+
+# Rust build artifacts (the compiled binary is large; build locally)
+target/

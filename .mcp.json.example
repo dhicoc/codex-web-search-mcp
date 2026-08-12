@@ -1,24 +1,35 @@
 {
   "mcpServers": {
     "codex-web-search": {
-      "command": "node",
-      "args": ["<这里填 `npm root -g` 的输出>/codex-web-search-mcp/codex-web-search-mcp.js"]
+      "command": "C:/path/to/codex-web-search-mcp/target/release/codex-web-search-mcp.exe"
     }
   }
 }
 
-// 说明：
-// ★ 最可靠写法（任何 Node 都能用）：先 `npm install -g github:dhicoc/codex-web-search-mcp`，
-//   再把上面 args 里的路径换成你机器上 `npm root -g` 返回目录下的
-//   codex-web-search-mcp/codex-web-search-mcp.js：
-//     - Windows 标准 Node：C:/Users/<用户名>/AppData/Roaming/npm/node_modules/...
-//     - macOS/Linux：/usr/local/lib/node_modules/...
-//   `node` 是 .exe（Windows）/ 可执行文件，Claude Code 直接 spawn，不经过 Windows .cmd 解析，
-//   因此在「受管 / 便携版 Node」（如某些 AI 工具内置的 Node）上也能稳定连上。
+// ───────────────────────────────────────────────────────────────────────────
+// codex-web-search-mcp v2.0.0（Rust 重写版）MCP 接入示例
 //
-// 标准 Node 首选（免路径）：若你的 Node 是标准安装（裸 npx 能解析 .cmd），可用社区标准写法：
-//   "command": "npx",
-//   "args": ["-y", "github:dhicoc/codex-web-search-mcp"]
-//   注意：在受管 / 便携 Node（如本工作区捆绑的 Node 22.22.2）上会报 `spawn npx ENOENT` → 30s 超时，请用上面的 node + 路径写法。
+// 与旧 Node 版最大的区别：Rust 版是独立可执行文件，不再需要 Node / npx！
+// 只要指向编译出的 exe（或 macOS/Linux 下的二进制）即可，Claude Code / 任意
+// 支持 MCP 的客户端直接 spawn，不经过任何 .cmd 解析，最稳。
 //
-// 绝对不要用：`"command": "cmd", "args": ["/c", ...]` —— 会破坏 MCP stdio 管道导致超时 / -32000。
+// 1) Windows（推荐 release 构建）：
+//      "command": "D:/codex-web-search-mcp/target/release/codex-web-search-mcp.exe"
+//
+// 2) macOS / Linux：
+//      "command": "/path/to/codex-web-search-mcp/target/release/codex-web-search-mcp"
+//
+// 3) 可选环境变量（不填也能用，默认走 OpenAI Codex 后端）：
+//      CODEX_ACCESS_TOKEN / CODEX_ACCOUNT_ID   —— 覆盖 codex login 的凭证
+//      CODEX_SEARCH_BACKEND=grok                —— 切到 Grok/xAI 后端（需下面 key）
+//      GROK_SEARCH_API_KEY 或 XAI_API_KEY       —— Grok 后端凭据
+//      GROK_SEARCH_URL / GROK_SEARCH_MODEL      —— Grok 自定义端点/模型
+//      TAVILY_API_KEY                           —— web_map 工具所需
+//      CODEX_SEARCH_CONFIG                      —— 指向 config.toml 的绝对路径
+//      （默认读取 ~/.config/codex-web-search-mcp/config.toml）
+//
+// 4) 凭证必做：先 `codex login`（生成 ~/.codex/auth.json），或设置
+//      CODEX_ACCESS_TOKEN。没有凭证任何搜索工具都会报错。
+//
+// 5) 绝对不要用："command": "cmd", "args": ["/c", ...] —— 会破坏 MCP stdio 管道
+//      导致超时 / -32000。

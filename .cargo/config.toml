@@ -1,0 +1,15 @@
+# 构建说明（本机 Windows）
+# 本项目是 Rust 重写版本，需要 Visual Studio 2023 的 MSVC 工具链（link.exe）+ Windows SDK。
+#
+# 推荐用封装脚本（已处理 MSVC 环境变量注入）：
+#   bash scripts/build.sh            # debug 构建
+#   bash scripts/build.sh --release  # release 构建（生产用）
+#
+# 关键坑：MSVC 的 link.exe/cl.exe 只认「反斜杠 + C:\ 盘符」的 INCLUDE/LIB 路径，
+# 用正斜杠会报 LNK1181: 无法打开输入文件“kernel32.lib”。
+# 本沙箱禁止从 Bash/PowerShell 调用 cmd.exe，因此不能用 `cmd /c vcvarsall.bat`，
+# scripts/build.sh 改为直接导出 VS 环境变量来解决。
+#
+# 产物：
+#   target/debug/codex-web-search-mcp.exe     （调试）
+#   target/release/codex-web-search-mcp.exe   （发布，推荐）
