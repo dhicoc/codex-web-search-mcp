@@ -6,6 +6,7 @@
 
 - 后端 **OpenAI Codex**（免费，只要 `codex login` 登录态）；
 - 3 个工具：`codex_web_search`、`codex_web_research`、`web_fetch`；
+- `web_fetch` 自动探测中文编码（GBK/GB2312 等）、跟随 301/302 重定向，避免乱码与空正文；
 - 独立二进制，**无需 Rust 运行时即可运行**（下载预编译 exe 即用）。
 
 > 灵感与端点实现来自 [mateusdcc/pi-gpt-search](https://github.com/mateusdcc/pi-gpt-search)（MIT）。
@@ -213,7 +214,7 @@ Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 
 |------|------|------|
 | `url` | string（必填） | 要抓取的网址 |
 
-返回剥离脚本/样式/标签后的纯文本。补足「搜到链接却读不到正文、JS 渲染页读不到」的短板。
+返回剥离脚本/样式/标签后的纯文本。**自动探测 charset 解码 GBK/GB2312 等中文编码，跟随 301/302 重定向**，补足「搜到链接却读不到正文、JS 渲染页读不到」的短板。
 （注意：纯 JS 动态渲染、需登录的页面仍可能读不到内容，这是服务端 fetch 的能力边界。）
 
 ## 调试与排错
