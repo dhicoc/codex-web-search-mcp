@@ -2,12 +2,12 @@
 
 一个**模型无关**的 MCP (Model Context Protocol) server，把 OpenAI Codex 的独立搜索端点
 （`chatgpt.com/backend-api/codex/alpha/search`）封装成 Claude Code / 任意 MCP 客户端可用的联网搜索工具。
-**已用 Rust 全量重写**为独立二进制（当前 v2.3.0，不再依赖 Node / npx）：
+**已用 Rust 全量重写**为独立二进制（当前 v2.3.1，不再依赖 Node / npx）：
 
 - 后端 **OpenAI Codex**（免费，只要 `codex login` 登录态）；
 - 3 个工具：`codex_web_search`、`codex_web_research`、`web_fetch`；
 - `web_fetch` 自动探测中文编码（GBK/GB2312 等）、跟随 301/302 重定向，避免乱码与空正文；
-- Codex 请求**自动重试**：对 `429` / 服务端 `5xx` / 网络抖动做指数退避（最多 3 次：500ms、1s）；`401/403` 直接友好报错不重试；
+- Codex 请求**自动重试**：对 `429` / 服务端 `5xx` / 网络抖动做指数退避（最多 3 次：500ms、1s）；`401/403` 以及其它 `4xx`（如 `400` 校验失败）直接友好报错、不重试；
 - **Token 自动刷新**：收到 `401` 且本机 `auth.json` 带有 `refresh_token` 时，自动换发新 `access_token` 并回写（先备份），免去手动 `codex login`；
 - **来源去重 + 按域名聚合**：多步 `research` 返回的来源按 `ref_id`/`url` 去重，并按域名分组展示，引用更干净；
 - 可分级日志：`--verbose` 或 `CODEX_MCP_LOG=debug` 把请求 URL、HTTP 状态、耗时、重试写到 **stderr**（绝不污染 MCP 的 stdout 管道）；
@@ -246,7 +246,7 @@ Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 
 
 ## 与原项目的差异
 
-| 维度 | pi-gpt-search（原，TS） | 旧版本项目（Node） | **本项目 v2.3.0（Rust 重写）** |
+| 维度 | pi-gpt-search（原，TS） | 旧版本项目（Node） | **本项目 v2.3.1（Rust 重写）** |
 |------|------------------------|-------------------|------------------------|
 | 语言 | TypeScript | 单文件 Node 脚本 | **Rust** |
 | 运行依赖 | Node + TS | Node | **无（独立二进制）** |
@@ -262,7 +262,7 @@ Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 
 **无需任何 npm 账号**。演进方向见 [ROADMAP.md](./ROADMAP.md)。
 
 ```bash
-git tag v2.3.0 && git push origin v2.3.0
+git tag v2.3.1 && git push origin v2.3.1
 ```
 
 > 二进制文件名在 CI 里按平台重命名（`win32-x64` / `darwin-universal` 等），与上方「方式 A」表格一致。

@@ -245,6 +245,37 @@ fn codex_endpoint() -> String {
         .unwrap_or_else(|| CODEX_ENDPOINT.to_string())
 }
 
+// Best-effort extraction of the backend's structured error body so the caller
+// (and the model) can see the real reason for a 4xx, e.g.
+// {"error":{"message":"...","type":"...","param":"...","code":"..."}}.
+// Returns None if the body isn't JSON or lacks the expected shape.
+fn extract_err_detail(resp: ureq::Response) -> Option<String> {
+    let body: Value = resp.into_json().ok()?;
+    let err = body.get("error")?;
+    let msg = err.get("message").and_then(|m| m.as_str());
+    let param = err.get("param").and_then(|p| p.as_str());
+    let code = err.get("code").and_then(|c| c.as_str());
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(m) = msg {
+        parts.push(m.to_string());
+    }
+    let extra: Vec<String> = [
+        param.map(|s| format!("param={}", s)),
+        code.map(|s| format!("code={}", s)),
+    ]
+    .iter()
+    .filter_map(|x| x.clone())
+    .collect();
+    if !extra.is_empty() {
+        parts.push(format!("[{}]", extra.join(", ")));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" "))
+    }
+}
+
 // One HTTP round-trip. Returns Ok(body) or Err((retryable, message)).
 // `retryable` gates exponential backoff: auth errors (401/403) and other 4xx
 // are fatal; rate-limit (429), 5xx and transport errors are worth retrying.
@@ -272,21 +303,35 @@ fn post_codex(
         }
         Err(e) => {
             let result = match e {
-                ureq::Error::Status(code, _resp) => match code {
-                    401 | 403 => (
-                        false,
-                        "Codex 凭证已过期（HTTP 401/403）。请重新运行 `codex login`。".into(),
-                    ),
-                    429 => (
-                        true,
-                        "触发 Codex 速率限制（HTTP 429）。请稍后重试。".into(),
-                    ),
-                    c if (500..=599).contains(&c) => (
-                        true,
-                        format!("Codex 服务端错误（HTTP {}），将自动重试。", c),
-                    ),
-                    c => (false, format!("Codex 请求失败（HTTP {}）", c)),
-                },
+                ureq::Error::Status(code, resp) => {
+                    let detail = extract_err_detail(resp);
+                    let with_detail = |base: &str| -> String {
+                        match &detail {
+                            Some(d) => format!("{}：{}", base, d),
+                            None => base.to_string(),
+                        }
+                    };
+                    match code {
+                        401 | 403 => (
+                            false,
+                            with_detail(
+                                "Codex 凭证已过期（HTTP 401/403）。请重新运行 `codex login`",
+                            ),
+                        ),
+                        429 => (
+                            true,
+                            "触发 Codex 速率限制（HTTP 429）。请稍后重试。".into(),
+                        ),
+                        c if (500..=599).contains(&c) => (
+                            true,
+                            format!("Codex 服务端错误（HTTP {}），将自动重试。", c),
+                        ),
+                        c => (
+                            false,
+                            with_detail(&format!("Codex 请求失败（HTTP {}）", c)),
+                        ),
+                    }
+                }
                 ureq::Error::Transport(_) => {
                     (true, format!("Codex 网络请求失败（可重试）: {}", e))
                 }
@@ -330,7 +375,14 @@ fn call_codex(commands: &Value) -> Result<Value, String> {
                     };
                 }
             }
-            // Standard exponential-backoff path (original token).
+            // Non-retryable errors (e.g. 400 validation failures, or 401/403
+            // without a refreshable token) must fail fast — do NOT retry, since
+            // the same request will only fail again.
+            if !retryable {
+                return Err(msg);
+            }
+            // Standard exponential-backoff path (original token): only reached
+            // for retryable failures (429 / 5xx / transport).
             let mut last_msg = msg;
             for attempt in 0..MAX_ATTEMPTS {
                 match post_codex(&endpoint, &auth_tuple, &payload) {
@@ -830,7 +882,7 @@ fn handle(msg: &Value) -> Option<Value> {
             "result": {
                 "protocolVersion": msg.get("params").and_then(|p| p.get("protocolVersion")).and_then(|x| x.as_str()).unwrap_or("2024-11-05"),
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "codex-web-search", "version": "2.3.0" }
+                "serverInfo": { "name": "codex-web-search", "version": "2.3.1" }
             }
         })),
         "notifications/initialized" | "initialized" => None,
@@ -1026,7 +1078,7 @@ mod tests {
     fn handle_initialize_returns_server_info() {
         let resp = handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
             .unwrap();
-        assert_eq!(resp["result"]["serverInfo"]["version"], "2.3.0");
+        assert_eq!(resp["result"]["serverInfo"]["version"], "2.3.1");
         assert_eq!(resp["result"]["serverInfo"]["name"], "codex-web-search");
     }
 
@@ -1069,14 +1121,34 @@ mod tests {
                         let mut buf = [0u8; 8192];
                         let mut acc: Vec<u8> = Vec::new();
                         let mut complete = false;
+                        // Read the FULL request (headers + body per Content-Length)
+                        // before responding. Replying after only the header terminator
+                        // and then closing can RST the still-writing client (10054),
+                        // making the suite flaky under rapid retry bursts.
+                        let mut content_length: usize = 0;
                         loop {
                             match s.read(&mut buf) {
                                 Ok(0) => break,
                                 Ok(n) => {
                                     acc.extend_from_slice(&buf[..n]);
-                                    if String::from_utf8_lossy(&acc).contains("\r\n\r\n") {
-                                        complete = true;
-                                        break;
+                                    let text = String::from_utf8_lossy(&acc);
+                                    if let Some(pos) = text.find("\r\n\r\n") {
+                                        for line in text[..pos].lines() {
+                                            if let Some(rest) = line
+                                                .to_ascii_lowercase()
+                                                .strip_prefix("content-length:")
+                                            {
+                                                content_length =
+                                                    rest.trim().parse().unwrap_or(0);
+                                            }
+                                        }
+                                        let body_start = pos + 4;
+                                        let body_len =
+                                            acc.len().saturating_sub(body_start);
+                                        if body_len >= content_length {
+                                            complete = true;
+                                            break;
+                                        }
                                     }
                                 }
                                 Err(_) => break,
@@ -1171,5 +1243,36 @@ mod tests {
         assert!(resp["result"]["isError"].as_bool().unwrap());
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("429"), "got: {}", text);
+    }
+
+    #[test]
+    fn search_400_passthroughs_error_detail() {
+        let _g = env_lock();
+        // Mirror the real backend's structured 400 body (observed via live probe).
+        let err = json!({
+            "error": {
+                "message": "Invalid 'commands.search_query': empty array. Expected an array with minimum length 1",
+                "type": "invalid_request_error",
+                "param": "commands.search_query",
+                "code": "empty_array"
+            }
+        })
+        .to_string();
+        let srv = MockServer::new(vec![(400, err)]);
+        let resp = search(&srv.base, "tok", "bad");
+        assert!(resp["result"]["isError"].as_bool().unwrap());
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        // The human-readable message must surface, not just "HTTP 400".
+        assert!(
+            text.contains("empty array"),
+            "error message should be passed through, got: {}",
+            text
+        );
+        // And the diagnostic code/param should accompany it.
+        assert!(
+            text.contains("empty_array"),
+            "error code should be passed through, got: {}",
+            text
+        );
     }
 }
