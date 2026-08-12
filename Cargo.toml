@@ -1,6 +1,6 @@
 [package]
 name = "codex-web-search-mcp"
-version = "2.1.0"
+version = "2.2.0"
 edition = "2021"
 description = "Model-independent web search & deep research MCP server (Rust rewrite), powered by the OpenAI Codex search endpoint."
 license = "MIT"

@@ -19,6 +19,32 @@ const REQ_TIMEOUT: u64 = 20;
 const FETCH_TIMEOUT: u64 = 30;
 
 // ---------------------------------------------------------------------------
+// Verbose logging (stderr only — must never touch stdout, which carries the
+// JSON-RPC protocol). Enabled via CODEX_MCP_LOG=debug|verbose|1 or --verbose/-v.
+// ---------------------------------------------------------------------------
+static VERBOSE: OnceLock<bool> = OnceLock::new();
+fn verbose() -> bool {
+    *VERBOSE.get_or_init(|| {
+        let env_on = std::env::var("CODEX_MCP_LOG")
+            .map(|v| {
+                let v = v.trim();
+                v.eq_ignore_ascii_case("debug")
+                    || v.eq_ignore_ascii_case("verbose")
+                    || v == "1"
+            })
+            .unwrap_or(false);
+        let arg_on = std::env::args().any(|a| a == "--verbose" || a == "-v");
+        env_on || arg_on
+    })
+}
+fn log_msg(level: &str, msg: &str) {
+    if !verbose() {
+        return;
+    }
+    eprintln!("[codex-mcp][{}] {}", level, msg);
+}
+
+// ---------------------------------------------------------------------------
 // Global state
 // ---------------------------------------------------------------------------
 static SESSION_ID: OnceLock<Mutex<String>> = OnceLock::new();
@@ -121,35 +147,104 @@ fn load_codex_auth() -> Option<(String, Option<String>)> {
 // ---------------------------------------------------------------------------
 // Codex backend
 // ---------------------------------------------------------------------------
+fn codex_endpoint() -> String {
+    std::env::var("CODEX_ENDPOINT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| CODEX_ENDPOINT.to_string())
+}
+
+// One HTTP round-trip. Returns Ok(body) or Err((retryable, message)).
+// `retryable` gates exponential backoff: auth errors (401/403) and other 4xx
+// are fatal; rate-limit (429), 5xx and transport errors are worth retrying.
+fn post_codex(
+    endpoint: &str,
+    auth: &(String, Option<String>),
+    payload: &Value,
+) -> Result<Value, (bool, String)> {
+    let timer = std::time::Instant::now();
+    let resp = ureq::post(endpoint)
+        .set("Authorization", &format!("Bearer {}", auth.0))
+        .set("ChatGPT-Account-ID", auth.1.as_deref().unwrap_or(""))
+        .set("Content-Type", "application/json")
+        .set("User-Agent", UA)
+        .timeout(Duration::from_secs(REQ_TIMEOUT))
+        .send_json(payload);
+    let elapsed = timer.elapsed();
+    match resp {
+        Ok(r) => {
+            log_msg("debug", &format!("Codex HTTP 200 in {:?}", elapsed));
+            let body: Value = r
+                .into_json()
+                .map_err(|e| (false, format!("解析响应失败: {}", e)))?;
+            Ok(body)
+        }
+        Err(e) => {
+            let result = match e {
+                ureq::Error::Status(code, _resp) => match code {
+                    401 | 403 => (
+                        false,
+                        "Codex 凭证已过期（HTTP 401/403）。请重新运行 `codex login`。".into(),
+                    ),
+                    429 => (
+                        true,
+                        "触发 Codex 速率限制（HTTP 429）。请稍后重试。".into(),
+                    ),
+                    c if (500..=599).contains(&c) => (
+                        true,
+                        format!("Codex 服务端错误（HTTP {}），将自动重试。", c),
+                    ),
+                    c => (false, format!("Codex 请求失败（HTTP {}）", c)),
+                },
+                ureq::Error::Transport(_) => {
+                    (true, format!("Codex 网络请求失败（可重试）: {}", e))
+                }
+            };
+            log_msg(
+                "warn",
+                &format!("Codex HTTP 错误 after {:?}: {}", elapsed, result.1),
+            );
+            Err(result)
+        }
+    }
+}
+
+// Calls Codex with exponential backoff: up to 3 attempts (1 initial + 2 retries),
+// 500ms then 1000ms. Auth/4xx errors fail immediately; 429/5xx/transport retry.
 fn call_codex(commands: &Value) -> Result<Value, String> {
     let auth = load_codex_auth().ok_or_else(|| {
         "未找到 Codex 登录凭证。请先运行 `codex login`，或设置环境变量 CODEX_ACCESS_TOKEN。".to_string()
     })?;
     let sid = session_id().lock().unwrap().clone();
     let payload = json!({ "id": sid, "model": DEFAULT_MODEL, "commands": commands });
-    let resp = ureq::post(CODEX_ENDPOINT)
-        .set("Authorization", &format!("Bearer {}", auth.0))
-        .set("ChatGPT-Account-ID", auth.1.as_deref().unwrap_or(""))
-        .set("Content-Type", "application/json")
-        .set("User-Agent", UA)
-        .timeout(Duration::from_secs(REQ_TIMEOUT))
-        .send_json(&payload);
-    match resp {
-        Ok(r) => {
-            let body: Value = r.into_json().map_err(|e| format!("解析响应失败: {}", e))?;
-            Ok(normalize_body(&body))
+    let endpoint = codex_endpoint();
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut last_msg = String::new();
+    for attempt in 0..MAX_ATTEMPTS {
+        match post_codex(&endpoint, &auth, &payload) {
+            Ok(body) => return Ok(normalize_body(&body)),
+            Err((retryable, msg)) => {
+                last_msg = msg;
+                if !retryable || attempt + 1 >= MAX_ATTEMPTS {
+                    break;
+                }
+                let backoff_ms = 500u64 * (1u64 << attempt);
+                log_msg(
+                    "warn",
+                    &format!(
+                        "第 {} 次请求失败，{}ms 后重试（{}/{}）",
+                        attempt + 1,
+                        backoff_ms,
+                        attempt + 1,
+                        MAX_ATTEMPTS
+                    ),
+                );
+                std::thread::sleep(Duration::from_millis(backoff_ms));
+            }
         }
-        Err(e) => match e {
-            ureq::Error::Status(code, _resp) => match code {
-                401 | 403 => Err(
-                    "Codex 凭证已过期（HTTP 401/403）。请重新运行 `codex login`。".into(),
-                ),
-                429 => Err("触发 Codex 速率限制（HTTP 429）。请稍后重试。".into()),
-                c => Err(format!("Codex 请求失败（HTTP {}）", c)),
-            },
-            other => Err(format!("Codex 请求失败: {}", other)),
-        },
     }
+    log_msg("warn", &format!("Codex 最终失败: {}", last_msg));
+    Err(last_msg)
 }
 
 fn normalize_body(body: &Value) -> Value {
@@ -584,6 +679,7 @@ fn handle_tool_call(name: &str, args: &Value) -> (String, bool) {
 fn handle(msg: &Value) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|x| x.as_str())?;
+    log_msg("debug", &format!("=> {}", method));
     match method {
         "initialize" => Some(json!({
             "jsonrpc": "2.0",
@@ -591,7 +687,7 @@ fn handle(msg: &Value) -> Option<Value> {
             "result": {
                 "protocolVersion": msg.get("params").and_then(|p| p.get("protocolVersion")).and_then(|x| x.as_str()).unwrap_or("2024-11-05"),
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "codex-web-search", "version": "2.1.0" }
+                "serverInfo": { "name": "codex-web-search", "version": "2.2.0" }
             }
         })),
         "notifications/initialized" | "initialized" => None,
@@ -611,7 +707,18 @@ fn handle(msg: &Value) -> Option<Value> {
                 .and_then(|p| p.get("arguments"))
                 .cloned()
                 .unwrap_or(Value::Null);
+            log_msg("info", &format!("tools/call: {}", name));
+            let t0 = std::time::Instant::now();
             let (text, is_error) = handle_tool_call(name, &args);
+            log_msg(
+                "debug",
+                &format!(
+                    "tools/call {} done in {:?}, isError={}",
+                    name,
+                    t0.elapsed(),
+                    is_error
+                ),
+            );
             Some(json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -657,5 +764,239 @@ fn main() {
             let _ = writeln!(out, "{}", serde_json::to_string(&resp).unwrap_or_default());
             let _ = out.flush();
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests (run with `cargo test`). Network-backed tests spin up a local mock
+// Codex endpoint via TcpListener; they never touch the real API or credentials.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::collections::VecDeque;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    // ---- pure-function tests (no network) ----
+
+    #[test]
+    fn clean_output_rewrites_known_ref() {
+        let mut refs: HashMap<String, (String, String)> = HashMap::new();
+        refs.insert(
+            "turn0search0".to_string(),
+            ("示例页".to_string(), "example.com".to_string()),
+        );
+        let inp = "答案 \u{e200}cite\u{e202}turn0search0\u{e201} 完毕";
+        let out = clean_output(inp, &refs);
+        assert!(
+            out.contains("[turn0search0: 示例页 → example.com]"),
+            "got: {}",
+            out
+        );
+    }
+
+    #[test]
+    fn clean_output_empty_cid_dropped() {
+        let refs: HashMap<String, (String, String)> = HashMap::new();
+        let inp = "x\u{e200}cite\u{e202}\u{e201}y";
+        let out = clean_output(inp, &refs);
+        assert_eq!(out, "xy");
+    }
+
+    #[test]
+    fn clean_output_unknown_ref_kept() {
+        let refs: HashMap<String, (String, String)> = HashMap::new();
+        let inp = "see \u{e200}cite\u{e202}turn0search9\u{e201}";
+        let out = clean_output(inp, &refs);
+        assert!(out.contains("[turn0search9]"), "got: {}", out);
+    }
+
+    #[test]
+    fn is_backend_error_detects() {
+        assert!(is_backend_error(&json!({"output": "Internal Error occurred"})));
+        assert!(is_backend_error(&json!({"output": "Unable to resolve the query"})));
+        assert!(!is_backend_error(&json!({"output": "正常结果"})));
+    }
+
+    #[test]
+    fn strip_html_removes_tags_and_scripts() {
+        let html = "<html><head><style>.a{color:red}</style></head><body><script>alert(1)</script><p>正文 <b>加粗</b></p></body></html>";
+        let out = strip_html(html);
+        assert!(!out.contains("<script"));
+        assert!(!out.contains("<style"));
+        assert!(!out.contains("<p>"));
+        assert!(out.contains("正文"));
+        assert!(out.contains("加粗"));
+    }
+
+    #[test]
+    fn detect_encoding_gbk_label() {
+        let enc = detect_encoding("text/html; charset=gbk", &[]);
+        assert_eq!(enc, encoding_rs::GBK);
+    }
+
+    #[test]
+    fn detect_encoding_utf8_fallback() {
+        let enc = detect_encoding("text/html", &[]);
+        assert_eq!(enc, encoding_rs::UTF_8);
+    }
+
+    #[test]
+    fn format_text_lists_sources() {
+        let norm = json!({
+            "output": "结果",
+            "results": [{"title": "标题A", "url": "https://a.com", "ref_id": "turn0search0", "snippet": "摘要A"}]
+        });
+        let out = format_text(&norm, true);
+        assert!(out.contains("Sources:"));
+        assert!(out.contains("标题A"));
+        assert!(out.contains("https://a.com"));
+    }
+
+    #[test]
+    fn handle_initialize_returns_server_info() {
+        let resp = handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
+            .unwrap();
+        assert_eq!(resp["result"]["serverInfo"]["version"], "2.2.0");
+        assert_eq!(resp["result"]["serverInfo"]["name"], "codex-web-search");
+    }
+
+    #[test]
+    fn handle_tools_list_has_three_tools() {
+        let resp = handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})).unwrap();
+        let tools = resp["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&"codex_web_search"));
+        assert!(names.contains(&"codex_web_research"));
+        assert!(names.contains(&"web_fetch"));
+    }
+
+    #[test]
+    fn handle_unknown_tool_errors() {
+        let resp = handle(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "nope", "arguments": {}}
+        }))
+        .unwrap();
+        assert!(resp["result"]["isError"].as_bool().unwrap());
+    }
+
+    // ---- mock-endpoint tests (drive the full handle() path) ----
+
+    struct MockServer {
+        base: String,
+        _queue: Arc<Mutex<VecDeque<(u16, String)>>>,
+    }
+    impl MockServer {
+        fn new(responses: Vec<(u16, String)>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let queue = Arc::new(Mutex::new(responses.into_iter().collect::<VecDeque<_>>()));
+            let q = queue.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if let Ok(mut s) = stream {
+                        let mut buf = [0u8; 8192];
+                        let mut acc: Vec<u8> = Vec::new();
+                        let mut complete = false;
+                        loop {
+                            match s.read(&mut buf) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    acc.extend_from_slice(&buf[..n]);
+                                    if String::from_utf8_lossy(&acc).contains("\r\n\r\n") {
+                                        complete = true;
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        if !complete {
+                            continue;
+                        }
+                        let (status, body) = {
+                            let mut q = q.lock().unwrap();
+                            q.pop_front().unwrap_or((200, "{}".to_string()))
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 {} status\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            status, body.len(), body
+                        );
+                        let _ = s.write_all(resp.as_bytes());
+                        let _ = s.flush();
+                    }
+                }
+            });
+            Self { base, _queue: queue }
+        }
+    }
+
+    // Serializes env mutation so mock-backed tests don't clobber each other.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    fn search(base: &str, token: &str, query: &str) -> Value {
+        std::env::set_var("CODEX_ENDPOINT", base);
+        std::env::set_var("CODEX_ACCESS_TOKEN", token);
+        handle(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "codex_web_search", "arguments": {"query": query}}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn search_via_mock_endpoint() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let body = json!({
+            "output": "答案 \u{e200}cite\u{e202}turn0search0\u{e201} 完毕",
+            "results": [{"url": "https://example.com", "ref_id": "turn0search0", "title": "示例页", "snippet": "摘要", "domain": "example.com"}]
+        })
+        .to_string();
+        let srv = MockServer::new(vec![(200, body)]);
+        let resp = search(&srv.base, "tok", "test");
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(!resp["result"]["isError"].as_bool().unwrap(), "got: {}", text);
+        assert!(text.contains("示例页"), "got: {}", text);
+        assert!(
+            text.contains("[turn0search0: 示例页 → example.com]"),
+            "got: {}",
+            text
+        );
+    }
+
+    #[test]
+    fn search_retries_on_429_then_succeeds() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let ok = json!({"output": "ok", "results": []}).to_string();
+        let srv = MockServer::new(vec![
+            (429, "{}".to_string()),
+            (429, "{}".to_string()),
+            (200, ok),
+        ]);
+        let t0 = std::time::Instant::now();
+        let resp = search(&srv.base, "tok", "retry");
+        let elapsed = t0.elapsed();
+        assert!(!resp["result"]["isError"].as_bool().unwrap());
+        // Two backoffs (500ms + 1000ms) must have elapsed.
+        assert!(elapsed >= Duration::from_millis(1400), "elapsed {:?}", elapsed);
+    }
+
+    #[test]
+    fn search_429_gives_up_with_error() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let srv = MockServer::new(vec![
+            (429, "{}".to_string()),
+            (429, "{}".to_string()),
+            (429, "{}".to_string()),
+        ]);
+        let resp = search(&srv.base, "tok", "never");
+        assert!(resp["result"]["isError"].as_bool().unwrap());
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("429"), "got: {}", text);
     }
 }

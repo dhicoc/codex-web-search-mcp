@@ -2,11 +2,13 @@
 
 一个**模型无关**的 MCP (Model Context Protocol) server，把 OpenAI Codex 的独立搜索端点
 （`chatgpt.com/backend-api/codex/alpha/search`）封装成 Claude Code / 任意 MCP 客户端可用的联网搜索工具。
-**已用 Rust 全量重写**为独立二进制（当前 v2.1.0，不再依赖 Node / npx）：
+**已用 Rust 全量重写**为独立二进制（当前 v2.2.0，不再依赖 Node / npx）：
 
 - 后端 **OpenAI Codex**（免费，只要 `codex login` 登录态）；
 - 3 个工具：`codex_web_search`、`codex_web_research`、`web_fetch`；
 - `web_fetch` 自动探测中文编码（GBK/GB2312 等）、跟随 301/302 重定向，避免乱码与空正文；
+- Codex 请求**自动重试**：对 `429` / 服务端 `5xx` / 网络抖动做指数退避（最多 3 次：500ms、1s）；`401/403` 直接友好报错不重试；
+- 可分级日志：`--verbose` 或 `CODEX_MCP_LOG=debug` 把请求 URL、HTTP 状态、耗时、重试写到 **stderr**（绝不污染 MCP 的 stdout 管道）；
 - 独立二进制，**无需 Rust 运行时即可运行**（下载预编译 exe 即用）。
 
 > 灵感与端点实现来自 [mateusdcc/pi-gpt-search](https://github.com/mateusdcc/pi-gpt-search)（MIT）。
@@ -217,9 +219,18 @@ Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 
 返回剥离脚本/样式/标签后的纯文本。**自动探测 charset 解码 GBK/GB2312 等中文编码，跟随 301/302 重定向**，补足「搜到链接却读不到正文、JS 渲染页读不到」的短板。
 （注意：纯 JS 动态渲染、需登录的页面仍可能读不到内容，这是服务端 fetch 的能力边界。）
 
+## 可选环境变量
+
+| 变量 | 说明 |
+|------|------|
+| `CODEX_ENDPOINT` | 覆盖 Codex 搜索端点 URL（默认 `https://chatgpt.com/backend-api/codex/alpha/search`）。可用于指向反向代理 / 自托管网关，也便于本地联调。 |
+| `CODEX_ACCESS_TOKEN` / `CODEX_ACCOUNT_ID` | 覆盖登录凭证（方式 2）。 |
+| `CODEX_MCP_LOG` | 设为 `debug` / `verbose` / `1` 开启调试日志（等价于命令行 `--verbose`）。日志写 **stderr**，不影响 MCP 通信。 |
+
 ## 调试与排错
 
 直接用 `initialize` / `tools/list` 在终端手动运行 exe 验证握手；或在客户端里用 `/mcp` 查看是否连上。
+排查网络 / 重试问题时，启动 exe 时加 `--verbose`（或设 `CODEX_MCP_LOG=debug`），可在 stderr 看到每次请求的 HTTP 状态、耗时与重试过程。
 
 | 现象 | 原因 / 解决 |
 |------|-------------|
@@ -228,10 +239,11 @@ Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 
 | `触发 Codex 速率限制（HTTP 429）` | 稍后重试，或减少调用频率 |
 | Windows 编译报 `LNK1181: 无法打开输入文件“kernel32.lib”` | `INCLUDE`/`LIB` 用了正斜杠。用 `scripts/build.sh`（已处理反斜杠）或手动导出带 `C:\` 反斜杠的 VS 环境变量 |
 | MCP 显示未连接 / `timed out` / `-32000` | 检查 exe 路径是否正确、JSON 是否合法；确认没用 `cmd /c` 包裹命令 |
+| 想看请求 / 重试细节 | 启动加 `--verbose`（或设 `CODEX_MCP_LOG=debug`），stderr 输出 HTTP 状态、耗时、重试 |
 
 ## 与原项目的差异
 
-| 维度 | pi-gpt-search（原，TS） | 旧版本项目（Node） | **本项目 v2.1.0（Rust 重写）** |
+| 维度 | pi-gpt-search（原，TS） | 旧版本项目（Node） | **本项目 v2.2.0（Rust 重写）** |
 |------|------------------------|-------------------|------------------------|
 | 语言 | TypeScript | 单文件 Node 脚本 | **Rust** |
 | 运行依赖 | Node + TS | Node | **无（独立二进制）** |
@@ -247,7 +259,7 @@ Rust 版是**独立二进制**，编译一次后直接让客户端 spawn 这个 
 **无需任何 npm 账号**。演进方向见 [ROADMAP.md](./ROADMAP.md)。
 
 ```bash
-git tag v2.0.1 && git push origin v2.0.1
+git tag v2.2.0 && git push origin v2.2.0
 ```
 
 > 二进制文件名在 CI 里按平台重命名（`win32-x64` / `darwin-universal` 等），与上方「方式 A」表格一致。

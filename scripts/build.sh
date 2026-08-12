@@ -18,4 +18,9 @@ export INCLUDE="C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\T
 export LIB="C:\\Program Files\\Microsoft Visual Studio\\18\\Community\\VC\\Tools\\MSVC\\$VS_VER\\lib\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\$SDKVER\\um\\x64;C:\\Program Files (x86)\\Windows Kits\\10\\Lib\\$SDKVER\\ucrt\\x64"
 
 cd "$(dirname "$0")/.."
-cargo build "$@"
+if [ "$1" = "test" ] || [ "$1" = "--test" ]; then
+  shift
+  cargo test "$@"
+else
+  cargo build "$@"
+fi
