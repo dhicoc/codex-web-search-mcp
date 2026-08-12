@@ -15,22 +15,14 @@
 | v2.2.0 | 端点容错与重试 | 对 Codex 请求加指数退避重试（最多 3 次：500ms、1s）：`429` / 服务端 `5xx` / 网络抖动可重试；`401/403` 与其他 `4xx` 直接友好降级不重试。新增 `CODEX_ENDPOINT` 环境变量覆盖端点（便于代理 / 联调）。 |
 | v2.2.0 | 可分级日志 | 新增 `--verbose`（或 `CODEX_MCP_LOG=debug`）开关，把握手、工具名、HTTP 状态、耗时、重试写到 **stderr**，绝不污染 MCP 的 stdout JSON-RPC 管道。 |
 | v2.2.0 | Rust 集成测试 + CI 跑测试 | `src/main.rs` 的 `#[cfg(test)]` 用本地 TcpListener mock Codex 端点，对引用清理 / 编码探测 / 后端错误识别 / `handle` 握手与 `tools/call` 路径做断言（含 `429→200` 重试）。CI 新增 `test` job 跑 `cargo test`，`build` 依赖其通过。 |
+| v2.3.0 | 来源去重与按域名聚合 | `normalize_body` 按 `ref_id`/`url` 去重（多步 research 的重复来源不再膨胀）；`format_text` 的 Sources 按 `domain` 分组展示（来源渲染更干净，工具返回结构不变）。新增 `normalize_body_dedupes_results` / `format_text_groups_by_domain` 两个测试。 |
+| v2.3.0 | Token 自动刷新（401 时） | `load_codex_auth` 改为 `CodexAuth` 结构体，记录 `auth.json` 路径与 `refresh_token`；`call_codex` 收到 `401` 且为文件凭证且含 `refresh_token` 时，调用 `CODEX_REFRESH_ENDPOINT`（默认 `chatgpt.com/backend-api/auth/refresh`，可覆盖）换发新 token，先备份 `auth.json` 再回写，重试一次。无 refresh_token 或刷新失败则退回友好重登提示。 |
 
 ---
 
-## 📋 待办（按优先级）
+## 📋 待办
 
-### 长期（生态，按需）
-
-#### 4. Token 自动刷新
-- **动机**：`auth.json` 含 `refresh_token`，过期需手动 `codex login`。
-- **做法**：检测 `401` 时用 `refresh_token` 换发新 `access_token` 并回写 `auth.json`（带备份）。
-- **风险**：需确认 Codex refresh 端点与 `auth.json` 结构，改动集中在 `load_codex_auth`。
-
-#### 5. 来源去重与按域名聚合
-- **动机**：多步 `research` 返回的来源列表可能重复，模型引用不够干净。
-- **做法**：在 `normalize_body` 里按 `ref_id`/`url` 去重，并按 `domain` 聚合输出，工具返回结构不变（仍在 `results` 数组内处理）。
-- **范围**：仅影响 `format_text` 的来源渲染。
+> 长期项（Token 自动刷新、来源去重聚合）已在 v2.3.0 落地，目前无明确待办。后续若收到新需求再补充。
 
 ---
 

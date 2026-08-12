@@ -3,7 +3,7 @@
 // Backend: OpenAI Codex (free with ChatGPT login).
 // Tools: codex_web_search, codex_web_research, web_fetch.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
@@ -113,7 +113,18 @@ fn home_dir() -> Option<PathBuf> {
         .ok()
         .map(PathBuf::from)
 }
-fn load_codex_auth() -> Option<(String, Option<String>)> {
+
+// Resolved Codex credentials. `file` is the auth.json path when loaded from disk
+// (so we can rewrite a refreshed token back); `refresh` is the refresh_token if
+// present — gates the auto-refresh path.
+struct CodexAuth {
+    access: String,
+    account_id: Option<String>,
+    file: Option<PathBuf>,
+    refresh: Option<String>,
+}
+
+fn load_codex_auth() -> Option<CodexAuth> {
     if let Some(t) = std::env::var("CODEX_ACCESS_TOKEN")
         .ok()
         .filter(|s| !s.is_empty())
@@ -121,7 +132,12 @@ fn load_codex_auth() -> Option<(String, Option<String>)> {
         let aid = std::env::var("CODEX_ACCOUNT_ID")
             .ok()
             .filter(|s| !s.is_empty());
-        return Some((t, aid));
+        return Some(CodexAuth {
+            access: t,
+            account_id: aid,
+            file: None,
+            refresh: None,
+        });
     }
     let home = home_dir()?;
     let p = home.join(".codex").join("auth.json");
@@ -137,11 +153,86 @@ fn load_codex_auth() -> Option<(String, Option<String>)> {
                     .and_then(|t| t.get("account_id"))
                     .and_then(|x| x.as_str())
                     .map(|s| s.to_string());
-                return Some((tok.to_string(), aid));
+                let refresh = v
+                    .get("tokens")
+                    .and_then(|t| t.get("refresh_token"))
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
+                return Some(CodexAuth {
+                    access: tok.to_string(),
+                    account_id: aid,
+                    file: Some(p),
+                    refresh,
+                });
             }
         }
     }
     None
+}
+
+// Refresh endpoint for the access token. Overridable because the exact Codex
+// token endpoint is not formally documented; the default is the ChatGPT backend
+// auth refresh route. Refresh only triggers on a 401 when a file-backed
+// refresh_token exists, and any failure degrades gracefully to a re-login prompt.
+fn codex_refresh_endpoint() -> String {
+    std::env::var("CODEX_REFRESH_ENDPOINT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "https://chatgpt.com/backend-api/auth/refresh".to_string())
+}
+
+fn backup_auth_file(path: &PathBuf) {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bak = path.with_extension(format!("json.bak.{}", ts));
+    let _ = std::fs::copy(path, &bak);
+}
+
+// Attempt to swap the refresh_token for a fresh access_token, then write it back
+// into auth.json (after a timestamped backup). Returns (new_access, new_refresh?).
+fn refresh_codex_token(path: &PathBuf, refresh: &str) -> Option<(String, Option<String>)> {
+    let endpoint = codex_refresh_endpoint();
+    log_msg("debug", &format!("尝试用 refresh_token 刷新 Codex 凭证: {}", endpoint));
+    let resp = ureq::post(&endpoint)
+        .set("Content-Type", "application/json")
+        .set("User-Agent", UA)
+        .timeout(Duration::from_secs(REQ_TIMEOUT))
+        .send_json(json!({ "refresh_token": refresh }));
+    let v: Value = match resp {
+        Ok(r) => match r.into_json() {
+            Ok(j) => j,
+            Err(e) => {
+                log_msg("warn", &format!("刷新响应解析失败: {}", e));
+                return None;
+            }
+        },
+        Err(e) => {
+            log_msg("warn", &format!("刷新请求失败: {}", e));
+            return None;
+        }
+    };
+    let new_access = v.get("access_token").and_then(|x| x.as_str())?.to_string();
+    let new_refresh = v
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    backup_auth_file(path);
+    if let Ok(s) = std::fs::read_to_string(path) {
+        if let Ok(mut cur) = serde_json::from_str::<Value>(&s) {
+            if let Some(tok) = cur.get_mut("tokens").and_then(|t| t.as_object_mut()) {
+                tok.insert("access_token".into(), json!(new_access));
+                if let Some(rf) = &new_refresh {
+                    tok.insert("refresh_token".into(), json!(rf));
+                }
+                if let Ok(written) = serde_json::to_string_pretty(&cur) {
+                    let _ = std::fs::write(path, written);
+                }
+            }
+        }
+    }
+    Some((new_access, new_refresh))
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +302,8 @@ fn post_codex(
 
 // Calls Codex with exponential backoff: up to 3 attempts (1 initial + 2 retries),
 // 500ms then 1000ms. Auth/4xx errors fail immediately; 429/5xx/transport retry.
+// On a 401 carrying a file-backed refresh_token, attempt a one-shot token refresh
+// and retry exactly once before giving up.
 fn call_codex(commands: &Value) -> Result<Value, String> {
     let auth = load_codex_auth().ok_or_else(|| {
         "未找到 Codex 登录凭证。请先运行 `codex login`，或设置环境变量 CODEX_ACCESS_TOKEN。".to_string()
@@ -219,37 +312,59 @@ fn call_codex(commands: &Value) -> Result<Value, String> {
     let payload = json!({ "id": sid, "model": DEFAULT_MODEL, "commands": commands });
     let endpoint = codex_endpoint();
     const MAX_ATTEMPTS: u32 = 3;
-    let mut last_msg = String::new();
-    for attempt in 0..MAX_ATTEMPTS {
-        match post_codex(&endpoint, &auth, &payload) {
-            Ok(body) => return Ok(normalize_body(&body)),
-            Err((retryable, msg)) => {
-                last_msg = msg;
-                if !retryable || attempt + 1 >= MAX_ATTEMPTS {
-                    break;
+    let auth_tuple = (auth.access.clone(), auth.account_id.clone());
+
+    match post_codex(&endpoint, &auth_tuple, &payload) {
+        Ok(body) => return Ok(normalize_body(&body)),
+        Err((retryable, msg)) => {
+            // Auth failure (401): refresh once if we hold a file-backed refresh_token.
+            if !retryable && msg.contains("401") && auth.file.is_some() && auth.refresh.is_some() {
+                let path = auth.file.clone().unwrap();
+                let refresh = auth.refresh.clone().unwrap();
+                if let Some((new_access, _new_refresh)) = refresh_codex_token(&path, &refresh) {
+                    log_msg("info", "Codex 凭证已用 refresh_token 自动刷新，正在重试");
+                    let refreshed = (new_access, auth.account_id.clone());
+                    return match post_codex(&endpoint, &refreshed, &payload) {
+                        Ok(body) => Ok(normalize_body(&body)),
+                        Err((_, m2)) => Err(m2),
+                    };
                 }
-                let backoff_ms = 500u64 * (1u64 << attempt);
-                log_msg(
-                    "warn",
-                    &format!(
-                        "第 {} 次请求失败，{}ms 后重试（{}/{}）",
-                        attempt + 1,
-                        backoff_ms,
-                        attempt + 1,
-                        MAX_ATTEMPTS
-                    ),
-                );
-                std::thread::sleep(Duration::from_millis(backoff_ms));
             }
+            // Standard exponential-backoff path (original token).
+            let mut last_msg = msg;
+            for attempt in 0..MAX_ATTEMPTS {
+                match post_codex(&endpoint, &auth_tuple, &payload) {
+                    Ok(body) => return Ok(normalize_body(&body)),
+                    Err((r, m)) => {
+                        last_msg = m;
+                        if !r || attempt + 1 >= MAX_ATTEMPTS {
+                            break;
+                        }
+                        let backoff_ms = 500u64 * (1u64 << attempt);
+                        log_msg(
+                            "warn",
+                            &format!(
+                                "第 {} 次请求失败，{}ms 后重试（{}/{}）",
+                                attempt + 1,
+                                backoff_ms,
+                                attempt + 1,
+                                MAX_ATTEMPTS
+                            ),
+                        );
+                        std::thread::sleep(Duration::from_millis(backoff_ms));
+                    }
+                }
+            }
+            log_msg("warn", &format!("Codex 最终失败: {}", last_msg));
+            Err(last_msg)
         }
     }
-    log_msg("warn", &format!("Codex 最终失败: {}", last_msg));
-    Err(last_msg)
 }
 
 fn normalize_body(body: &Value) -> Value {
     let mut refs: HashMap<String, (String, String)> = HashMap::new();
     let mut results = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
     if let Some(arr) = body.get("results").and_then(|x| x.as_array()) {
         for it in arr {
             let url = it.get("url").and_then(|x| x.as_str());
@@ -262,6 +377,12 @@ fn normalize_body(body: &Value) -> Value {
                     rid.to_string(),
                     (title.unwrap_or("").to_string(), domain.unwrap_or("").to_string()),
                 );
+            }
+            // Dedupe by ref_id (preferred) or url so repeated research steps don't
+            // bloat the source list.
+            let key = ref_id.or(url).unwrap_or("").to_string();
+            if key.is_empty() || !seen.insert(key) {
+                continue;
             }
             if url.is_none() && ref_id.is_none() && title.is_none() && snippet.is_none() {
                 continue;
@@ -508,28 +629,50 @@ fn format_text(norm: &Value, expose_refs: bool) -> String {
         if !arr.is_empty() {
             lines.push(String::new());
             lines.push("Sources:".into());
-            for (i, r) in arr.iter().enumerate() {
-                let title = r
-                    .get("title")
+            // Group by domain so same-site sources cluster together (stable order,
+            // first-seen domain wins). The per-item [N] index is just readability;
+            // ref_id is what open/click use, so renumbering is safe.
+            let mut groups: Vec<(String, Vec<&Value>)> = Vec::new();
+            for r in arr {
+                let domain = r
+                    .get("domain")
                     .and_then(|x| x.as_str())
-                    .or_else(|| r.get("url").and_then(|x| x.as_str()))
-                    .unwrap_or("(untitled)");
-                if expose_refs {
-                    if let Some(rid) = r.get("ref_id").and_then(|x| x.as_str()) {
-                        lines.push(format!("[{}] (ref: {}) {}", i + 1, rid, title));
+                    .unwrap_or("")
+                    .to_string();
+                match groups.iter_mut().find(|(d, _)| *d == domain) {
+                    Some(g) => g.1.push(r),
+                    None => groups.push((domain, vec![r])),
+                }
+            }
+            let mut idx = 0usize;
+            for (domain, items) in groups {
+                if !domain.is_empty() {
+                    lines.push(format!("— {} —", domain));
+                }
+                for r in items {
+                    idx += 1;
+                    let title = r
+                        .get("title")
+                        .and_then(|x| x.as_str())
+                        .or_else(|| r.get("url").and_then(|x| x.as_str()))
+                        .unwrap_or("(untitled)");
+                    if expose_refs {
+                        if let Some(rid) = r.get("ref_id").and_then(|x| x.as_str()) {
+                            lines.push(format!("[{}] (ref: {}) {}", idx, rid, title));
+                        } else {
+                            lines.push(format!("[{}] {}", idx, title));
+                        }
                     } else {
-                        lines.push(format!("[{}] {}", i + 1, title));
+                        lines.push(format!("[{}] {}", idx, title));
                     }
-                } else {
-                    lines.push(format!("[{}] {}", i + 1, title));
-                }
-                if let Some(u) = r.get("url").and_then(|x| x.as_str()) {
-                    lines.push(format!("    {}", u));
-                } else if let Some(d) = r.get("domain").and_then(|x| x.as_str()) {
-                    lines.push(format!("    {}", d));
-                }
-                if let Some(s) = r.get("snippet").and_then(|x| x.as_str()) {
-                    lines.push(format!("    {}", s));
+                    if let Some(u) = r.get("url").and_then(|x| x.as_str()) {
+                        lines.push(format!("    {}", u));
+                    } else if let Some(d) = r.get("domain").and_then(|x| x.as_str()) {
+                        lines.push(format!("    {}", d));
+                    }
+                    if let Some(s) = r.get("snippet").and_then(|x| x.as_str()) {
+                        lines.push(format!("    {}", s));
+                    }
                 }
             }
         }
@@ -687,7 +830,7 @@ fn handle(msg: &Value) -> Option<Value> {
             "result": {
                 "protocolVersion": msg.get("params").and_then(|p| p.get("protocolVersion")).and_then(|x| x.as_str()).unwrap_or("2024-11-05"),
                 "capabilities": { "tools": {} },
-                "serverInfo": { "name": "codex-web-search", "version": "2.2.0" }
+                "serverInfo": { "name": "codex-web-search", "version": "2.3.0" }
             }
         })),
         "notifications/initialized" | "initialized" => None,
@@ -846,22 +989,44 @@ mod tests {
     }
 
     #[test]
-    fn format_text_lists_sources() {
+    fn normalize_body_dedupes_results() {
+        let body = json!({
+            "output": "o",
+            "results": [
+                {"url": "https://a.com", "ref_id": "turn0search0", "title": "A"},
+                {"url": "https://a.com", "ref_id": "turn0search0", "title": "A"},
+                {"url": "https://b.com", "ref_id": "turn0search1", "title": "B"}
+            ]
+        });
+        let norm = normalize_body(&body);
+        let arr = norm["results"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "should dedupe identical ref_id/url entries");
+    }
+
+    #[test]
+    fn format_text_groups_by_domain() {
         let norm = json!({
             "output": "结果",
-            "results": [{"title": "标题A", "url": "https://a.com", "ref_id": "turn0search0", "snippet": "摘要A"}]
+            "results": [
+                {"title": "标题A", "url": "https://a.com", "ref_id": "turn0search0", "domain": "a.com"},
+                {"title": "标题B", "url": "https://b.com", "ref_id": "turn0search1", "domain": "b.com"},
+                {"title": "标题A2", "url": "https://a.com/x", "ref_id": "turn0search2", "domain": "a.com"}
+            ]
         });
         let out = format_text(&norm, true);
         assert!(out.contains("Sources:"));
-        assert!(out.contains("标题A"));
-        assert!(out.contains("https://a.com"));
+        // same domain clustered: a.com header appears once, both a.com items before b.com
+        let pos_a = out.find("— a.com —").unwrap();
+        let pos_b = out.find("— b.com —").unwrap();
+        assert!(pos_a < pos_b, "a.com group should precede b.com group");
+        assert!(out.matches("— a.com —").count() == 1, "each domain header printed once");
     }
 
     #[test]
     fn handle_initialize_returns_server_info() {
         let resp = handle(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}))
             .unwrap();
-        assert_eq!(resp["result"]["serverInfo"]["version"], "2.2.0");
+        assert_eq!(resp["result"]["serverInfo"]["version"], "2.3.0");
         assert_eq!(resp["result"]["serverInfo"]["name"], "codex-web-search");
     }
 
@@ -939,6 +1104,10 @@ mod tests {
 
     // Serializes env mutation so mock-backed tests don't clobber each other.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // Recover from poison so one failing mock test can't cascade into the others.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
     fn search(base: &str, token: &str, query: &str) -> Value {
         std::env::set_var("CODEX_ENDPOINT", base);
         std::env::set_var("CODEX_ACCESS_TOKEN", token);
@@ -951,7 +1120,7 @@ mod tests {
 
     #[test]
     fn search_via_mock_endpoint() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let body = json!({
             "output": "答案 \u{e200}cite\u{e202}turn0search0\u{e201} 完毕",
             "results": [{"url": "https://example.com", "ref_id": "turn0search0", "title": "示例页", "snippet": "摘要", "domain": "example.com"}]
@@ -971,9 +1140,10 @@ mod tests {
 
     #[test]
     fn search_retries_on_429_then_succeeds() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
         let ok = json!({"output": "ok", "results": []}).to_string();
         let srv = MockServer::new(vec![
+            (429, "{}".to_string()),
             (429, "{}".to_string()),
             (429, "{}".to_string()),
             (200, ok),
@@ -988,8 +1158,11 @@ mod tests {
 
     #[test]
     fn search_429_gives_up_with_error() {
-        let _g = ENV_LOCK.lock().unwrap();
+        let _g = env_lock();
+        // call_codex fires one request up front, then up to 3 backoff attempts, so
+        // queue 4 × 429 to exhaust every attempt and land on a hard error.
         let srv = MockServer::new(vec![
+            (429, "{}".to_string()),
             (429, "{}".to_string()),
             (429, "{}".to_string()),
             (429, "{}".to_string()),
